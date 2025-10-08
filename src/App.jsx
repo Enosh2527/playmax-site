@@ -205,6 +205,7 @@ function EmptyState({ icon: Icon, title, description }) {
 }
 
 export default function App() {
+  const isDraftMode = import.meta.env.MODE === "draft";
   const [allowedEmails, setAllowedEmails] = useState(initialAllowedEmails);
   const [users, setUsers] = useState(initialUsers);
   const [currentUser, setCurrentUser] = useState(null);
@@ -1386,6 +1387,16 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#010409] text-slate-100">
+      {isDraftMode && (
+        <div className="border-b border-amber-400/30 bg-amber-500/10 px-6 py-3 text-sm text-amber-200">
+          <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3">
+            <span className="font-medium uppercase tracking-wide">Draft preview</span>
+            <p className="text-amber-100/80">
+              You are viewing VaultHub in draft mode. Use this session for internal reviews before publishing.
+            </p>
+          </div>
+        </div>
+      )}
       <div className="mx-auto max-w-6xl px-6 py-10 space-y-10">
         {renderDashboard()}
       </div>
