@@ -11,6 +11,17 @@ npm run dev
 
 Then open the URL printed by Vite (usually http://localhost:5173).
 
+## Default access
+
+Two administrator accounts are seeded so you can explore the workspace immediately:
+
+| Name | Email | Password |
+| --- | --- | --- |
+| Vault Admin | `admin@vaulthub.dev` | `admin123` |
+| Raj Hanoch | `rajhanoch24@gmail.com` | `raj_admin123` |
+
+Use one of these credentials on the login screen. Administrators can approve additional email addresses from the Admin Control Room once signed in.
+
 ## Draft preview mode
 
 Launch the interface with a persistent "Draft preview" banner by using Vite's `draft` mode. This is handy when you want to

@@ -25,7 +25,7 @@ import { Input } from "./components/ui/input";
 import { Textarea } from "./components/ui/textarea";
 import { Badge } from "./components/ui/badge";
 
-const initialAllowedEmails = ["admin@vaulthub.dev"];
+const initialAllowedEmails = ["admin@vaulthub.dev", "rajhanoch24@gmail.com"];
 const initialUsers = [
   {
     id: "admin",
@@ -34,7 +34,17 @@ const initialUsers = [
     password: "admin123",
     role: "admin",
   },
+  {
+    id: "rajhanoch24",
+    name: "Raj Hanoch",
+    email: "rajhanoch24@gmail.com",
+    password: "raj_admin123",
+    role: "admin",
+  },
 ];
+const protectedAdminEmails = new Set(
+  initialUsers.filter((user) => user.role === "admin").map((user) => user.email)
+);
 
 const categories = [
   { id: "prompts", label: "Prompts", icon: FileText, accent: "from-[#238636] to-[#2ea043]" },
@@ -1771,7 +1781,7 @@ export default function App() {
               {allowedEmails.map((email) => (
                 <div key={email} className="flex items-center justify-between rounded-lg border border-white/5 bg-black/30 px-4 py-2 text-sm">
                   <span className="text-slate-200">{email}</span>
-                  {email !== initialAllowedEmails[0] && (
+                  {!protectedAdminEmails.has(email) && (
                     <Button
                       size="sm"
                       variant="outline"
