@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Lock,
   LogIn,
@@ -17,6 +17,7 @@ import {
   UploadCloud,
   MoreHorizontal,
   Layers,
+  HardDrive,
 } from "lucide-react";
 import { Button } from "./components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
@@ -40,6 +41,13 @@ const categories = [
   { id: "scripts", label: "Scripts", icon: Layers, accent: "from-[#1f6feb] to-[#388bfd]" },
   { id: "links", label: "Links", icon: Link2, accent: "from-[#bf3989] to-[#f778ba]" },
 ];
+
+const GOOGLE_API_KEY = import.meta.env.VITE_GOOGLE_API_KEY;
+const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID;
+const DRIVE_SCOPES =
+  "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.metadata.readonly";
+const DRIVE_FOLDER_NAME = "VaultHub Workspace";
+const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 
 const textEncoder = new TextEncoder();
 
@@ -212,6 +220,15 @@ export default function App() {
   const [authView, setAuthView] = useState("login");
   const [authError, setAuthError] = useState("");
 
+  const missingDriveCredentials = !GOOGLE_API_KEY || !GOOGLE_CLIENT_ID;
+  const [driveClientReady, setDriveClientReady] = useState(false);
+  const [driveConnected, setDriveConnected] = useState(false);
+  const [driveLoading, setDriveLoading] = useState(false);
+  const [driveError, setDriveError] = useState("");
+  const [driveFolders, setDriveFolders] = useState(null);
+  const [driveProfile, setDriveProfile] = useState(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+
   const [activeTab, setActiveTab] = useState("prompts");
   const [activeView, setActiveView] = useState("dashboard");
 
@@ -230,6 +247,33 @@ export default function App() {
   const [scriptFolderFiles, setScriptFolderFiles] = useState([]);
 
   const folderInputRef = useRef(null);
+  const tokenClientRef = useRef(null);
+  const driveFoldersRef = useRef(null);
+
+  const loadScript = useCallback((src) => {
+    return new Promise((resolve, reject) => {
+      if (document.querySelector(`script[src="${src}"]`)) {
+        resolve();
+        return;
+      }
+      const script = document.createElement("script");
+      script.src = src;
+      script.async = true;
+      script.defer = true;
+      script.onload = () => resolve();
+      script.onerror = () => reject(new Error(`Failed to load ${src}`));
+      document.body.appendChild(script);
+    });
+  }, []);
+
+  const handleDriveError = useCallback((error) => {
+    console.error(error);
+    const message =
+      typeof error === "string"
+        ? error
+        : error?.message || "Something went wrong while talking to Google Drive.";
+    setDriveError(message);
+  }, []);
 
   useEffect(() => {
     if (scriptMode === "file") {
@@ -238,6 +282,50 @@ export default function App() {
       setScriptFiles([]);
     }
   }, [scriptMode]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const initialise = async () => {
+      if (missingDriveCredentials) {
+        setDriveClientReady(false);
+        setDriveConnected(false);
+        setDriveFolders(null);
+        handleDriveError(
+          "Add VITE_GOOGLE_API_KEY and VITE_GOOGLE_CLIENT_ID to connect Google Drive storage."
+        );
+        return;
+      }
+      try {
+        setDriveError("");
+        await loadScript("https://accounts.google.com/gsi/client");
+        await loadScript("https://apis.google.com/js/api.js");
+        await new Promise((resolve) => {
+          window.gapi.load("client", resolve);
+        });
+        await window.gapi.client.init({
+          apiKey: GOOGLE_API_KEY,
+          discoveryDocs: ["https://www.googleapis.com/discovery/v1/apis/drive/v3/rest"],
+        });
+        if (cancelled) return;
+        tokenClientRef.current = window.google.accounts.oauth2.initTokenClient({
+          client_id: GOOGLE_CLIENT_ID,
+          scope: DRIVE_SCOPES,
+          callback: () => {},
+        });
+        setDriveClientReady(true);
+      } catch (error) {
+        if (!cancelled) {
+          handleDriveError(error);
+        }
+      }
+    };
+
+    initialise();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [handleDriveError, loadScript, missingDriveCredentials]);
 
   useEffect(() => {
     if (folderInputRef.current) {
@@ -255,6 +343,316 @@ export default function App() {
       window.removeEventListener("contextmenu", listener);
     };
   }, []);
+
+  const requestDriveAccess = useCallback(
+    (promptForConsent = false) => {
+      if (!driveClientReady || !tokenClientRef.current) {
+        return Promise.reject(new Error("Google Drive isn't ready yet."));
+      }
+      return new Promise((resolve, reject) => {
+        tokenClientRef.current.callback = (response) => {
+          if (response.error) {
+            reject(new Error(response.error_description || "Google Drive authorization was denied."));
+            return;
+          }
+          const accessToken = response.access_token;
+          window.gapi.client.setToken({ access_token: accessToken });
+          setDriveConnected(true);
+          resolve(accessToken);
+        };
+        try {
+          tokenClientRef.current.requestAccessToken({ prompt: promptForConsent ? "consent" : "" });
+        } catch (error) {
+          reject(error);
+        }
+      });
+    },
+    [driveClientReady]
+  );
+
+  const ensureDriveToken = useCallback(async () => {
+    const token = window.gapi?.client?.getToken?.();
+    if (token?.access_token) {
+      return token.access_token;
+    }
+    return requestDriveAccess(false);
+  }, [requestDriveAccess]);
+
+  const driveApiFetch = useCallback(
+    async (url, options = {}) => {
+      const accessToken = await ensureDriveToken();
+      const headers = {
+        Authorization: `Bearer ${accessToken}`,
+        ...(options.headers || {}),
+      };
+      const response = await fetch(url, { ...options, headers });
+      if (!response.ok) {
+        const detail = await response.text();
+        throw new Error(detail || `Google Drive request failed (${response.status})`);
+      }
+      return response;
+    },
+    [ensureDriveToken]
+  );
+
+  const findFolderByProperty = useCallback(
+    async (key, value) => {
+      await ensureDriveToken();
+      const query = `trashed=false and mimeType='${FOLDER_MIME_TYPE}' and appProperties has { key='${key}', value='${value}' }`;
+      const response = await window.gapi.client.drive.files.list({
+        q: query,
+        fields: "files(id,name,appProperties,parents)",
+        pageSize: 1,
+      });
+      const files = response.result.files || [];
+      return files[0] ?? null;
+    },
+    [ensureDriveToken]
+  );
+
+  const createDriveFolder = useCallback(
+    async (name, parentId, appProperties = {}) => {
+      await ensureDriveToken();
+      const response = await window.gapi.client.drive.files.create({
+        resource: {
+          name,
+          mimeType: FOLDER_MIME_TYPE,
+          parents: parentId ? [parentId] : undefined,
+          appProperties: { vaultHub: "true", ...appProperties },
+        },
+        fields: "id,name,appProperties,parents,createdTime,description",
+      });
+      return response.result;
+    },
+    [ensureDriveToken]
+  );
+
+  const ensureWorkspaceStructure = useCallback(async () => {
+    let root = await findFolderByProperty("vaultHubRoot", "true");
+    if (!root) {
+      root = await createDriveFolder(DRIVE_FOLDER_NAME, null, { vaultHubRoot: "true" });
+    }
+
+    const ensureCategoryFolder = async (category, defaultName) => {
+      const query =
+        `trashed=false and mimeType='${FOLDER_MIME_TYPE}' and appProperties has { key='vaultHubCategory', value='${category}' } and '${root.id}' in parents`;
+      const response = await window.gapi.client.drive.files.list({
+        q: query,
+        fields: "files(id,name,appProperties,parents)",
+        pageSize: 1,
+      });
+      let folder = response.result.files?.[0];
+      if (!folder) {
+        folder = await createDriveFolder(defaultName, root.id, {
+          vaultHubCategory: category,
+        });
+      }
+      return folder;
+    };
+
+    const promptsFolder = await ensureCategoryFolder("prompts", "Prompts");
+    const scriptsFolder = await ensureCategoryFolder("scripts", "Scripts");
+    const linksFolder = await ensureCategoryFolder("links", "Links");
+
+    const folders = {
+      rootId: root.id,
+      promptsId: promptsFolder.id,
+      scriptsId: scriptsFolder.id,
+      linksId: linksFolder.id,
+    };
+
+    driveFoldersRef.current = folders;
+    setDriveFolders(folders);
+    return folders;
+  }, [createDriveFolder, findFolderByProperty]);
+
+  const listFolderContents = useCallback(
+    async (folderId) => {
+      await ensureDriveToken();
+      const items = [];
+      let pageToken = undefined;
+      do {
+        const response = await window.gapi.client.drive.files.list({
+          q: `'${folderId}' in parents and trashed=false`,
+          fields:
+            "nextPageToken,files(id,name,mimeType,description,appProperties,createdTime,modifiedTime,size,parents,owners(displayName,emailAddress))",
+          pageSize: 1000,
+          pageToken,
+        });
+        const files = response.result.files || [];
+        items.push(...files);
+        pageToken = response.result.nextPageToken;
+      } while (pageToken);
+      return items;
+    },
+    [ensureDriveToken]
+  );
+
+  const fetchDriveProfile = useCallback(async () => {
+    await ensureDriveToken();
+    const response = await window.gapi.client.drive.about.get({
+      fields: "user(displayName,emailAddress)",
+    });
+    return response.result.user;
+  }, [ensureDriveToken]);
+
+  const loadPromptsFromDrive = useCallback(
+    async (folderId) => {
+      if (!folderId) return [];
+      const files = await listFolderContents(folderId);
+      const entries = [];
+      for (const file of files) {
+        try {
+          const response = await driveApiFetch(
+            `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`
+          );
+          const text = await response.text();
+          const data = JSON.parse(text);
+          entries.push({
+            id: file.id,
+            name: data.name || file.name.replace(/\.json$/i, ""),
+            description: data.description || "",
+            notes: data.notes || file.description || "",
+            uploader: data.uploader || file.appProperties?.uploaderName || file.owners?.[0]?.displayName || "Unknown",
+            uploaderEmail:
+              data.uploaderEmail || file.appProperties?.uploaderEmail || file.owners?.[0]?.emailAddress || "",
+            createdAt: data.createdAt || file.appProperties?.createdAt || file.createdTime,
+            fileId: file.id,
+          });
+        } catch (error) {
+          console.warn("Failed to read prompt", file.id, error);
+        }
+      }
+      entries.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+      setPrompts(entries);
+      return entries;
+    },
+    [driveApiFetch, listFolderContents]
+  );
+
+  const loadLinksFromDrive = useCallback(
+    async (folderId) => {
+      if (!folderId) return [];
+      const files = await listFolderContents(folderId);
+      const entries = [];
+      for (const file of files) {
+        try {
+          const response = await driveApiFetch(
+            `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`
+          );
+          const text = await response.text();
+          const data = JSON.parse(text);
+          entries.push({
+            id: file.id,
+            name: data.name || file.name.replace(/\.json$/i, ""),
+            url: data.url || "",
+            notes: data.notes || file.description || "",
+            uploader: data.uploader || file.appProperties?.uploaderName || file.owners?.[0]?.displayName || "Unknown",
+            uploaderEmail:
+              data.uploaderEmail || file.appProperties?.uploaderEmail || file.owners?.[0]?.emailAddress || "",
+            createdAt: data.createdAt || file.appProperties?.createdAt || file.createdTime,
+            fileId: file.id,
+          });
+        } catch (error) {
+          console.warn("Failed to read link", file.id, error);
+        }
+      }
+      entries.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+      setLinks(entries);
+      return entries;
+    },
+    [driveApiFetch, listFolderContents]
+  );
+
+  const loadScriptsFromDrive = useCallback(
+    async (folderId, logicalParentId = null, collection = []) => {
+      if (!folderId) return collection;
+      const files = await listFolderContents(folderId);
+      for (const file of files) {
+        const base = {
+          id: file.id,
+          name: file.name,
+          notes: file.description || "",
+          uploader: file.appProperties?.uploaderName || file.owners?.[0]?.displayName || "Unknown",
+          uploaderEmail: file.appProperties?.uploaderEmail || file.owners?.[0]?.emailAddress || "",
+          createdAt: file.appProperties?.createdAt || file.createdTime,
+          parentId: logicalParentId,
+        };
+        if (file.mimeType === FOLDER_MIME_TYPE) {
+          const folderItem = {
+            ...base,
+            type: "folder",
+          };
+          collection.push(folderItem);
+          await loadScriptsFromDrive(file.id, file.id, collection);
+        } else {
+          const fileItem = {
+            ...base,
+            type: "file",
+            mimeType: file.mimeType,
+            size: Number(file.size || 0),
+            originalName: file.appProperties?.originalName || file.name,
+          };
+          collection.push(fileItem);
+        }
+      }
+      return collection;
+    },
+    [listFolderContents]
+  );
+
+  const refreshWorkspace = useCallback(async () => {
+    try {
+      setDriveLoading(true);
+      const folders = driveFoldersRef.current || (await ensureWorkspaceStructure());
+      await Promise.all([
+        loadPromptsFromDrive(folders.promptsId),
+        loadLinksFromDrive(folders.linksId),
+        (async () => {
+          const entries = await loadScriptsFromDrive(folders.scriptsId, null, []);
+          setScripts(entries);
+        })(),
+      ]);
+      setDriveError("");
+      if (!driveProfile) {
+        const profile = await fetchDriveProfile();
+        setDriveProfile(profile);
+      }
+    } catch (error) {
+      handleDriveError(error);
+    } finally {
+      setDriveLoading(false);
+    }
+  }, [
+    ensureWorkspaceStructure,
+    fetchDriveProfile,
+    handleDriveError,
+    loadLinksFromDrive,
+    loadPromptsFromDrive,
+    loadScriptsFromDrive,
+    driveProfile,
+  ]);
+
+  const handleDriveConnect = useCallback(async () => {
+    try {
+      setDriveLoading(true);
+      await requestDriveAccess(true);
+      await refreshWorkspace();
+    } catch (error) {
+      handleDriveError(error);
+    } finally {
+      setDriveLoading(false);
+    }
+  }, [handleDriveError, refreshWorkspace, requestDriveAccess]);
+
+  useEffect(() => {
+    if (!driveClientReady || missingDriveCredentials) return;
+    const token = window.gapi?.client?.getToken?.();
+    if (token?.access_token && !driveConnected) {
+      setDriveConnected(true);
+      refreshWorkspace();
+    }
+  }, [driveClientReady, driveConnected, missingDriveCredentials, refreshWorkspace]);
 
   const scriptsById = useMemo(() => {
     const map = new Map();
@@ -286,6 +684,9 @@ export default function App() {
     }),
     [prompts, links, scripts]
   );
+
+  const driveReadyForActions = driveConnected && Boolean(driveFolders);
+  const isBusy = isProcessing || driveLoading;
 
   const handleAuth = (event) => {
     event.preventDefault();
@@ -331,151 +732,276 @@ export default function App() {
     setActiveView("dashboard");
   };
 
-  const handleAddPrompt = (event) => {
+  const handleAddPrompt = async (event) => {
     event.preventDefault();
     if (!currentUser) return;
+    if (!driveFolders?.promptsId) {
+      handleDriveError("Connect Google Drive before saving prompts.");
+      return;
+    }
     const form = new FormData(event.currentTarget);
-    const name = String(form.get("name")).trim();
+    const name = String(form.get("name") || "").trim();
     const description = String(form.get("description") || "").trim();
     const notes = String(form.get("notes") || "").trim();
     if (!name) return;
-    const entry = {
-      id: crypto.randomUUID(),
+    const createdAt = new Date().toISOString();
+    const payload = {
       name,
       description,
       notes,
       uploader: currentUser.name,
       uploaderEmail: currentUser.email,
-      createdAt: new Date().toISOString(),
+      createdAt,
     };
-    setPrompts((prev) => [...prev, entry]);
-    event.currentTarget.reset();
+    try {
+      setIsProcessing(true);
+      await ensureDriveToken();
+      const response = await window.gapi.client.drive.files.create({
+        resource: {
+          name: safeFileName(name, "json"),
+          parents: [driveFolders.promptsId],
+          description: notes,
+          appProperties: {
+            vaultHub: "true",
+            uploaderName: currentUser.name,
+            uploaderEmail: currentUser.email,
+            createdAt,
+          },
+        },
+        media: {
+          mimeType: "application/json",
+          body: new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }),
+        },
+        fields: "id",
+      });
+      const entry = { ...payload, id: response.result.id, fileId: response.result.id };
+      setPrompts((prev) =>
+        [...prev, entry].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
+      );
+      event.currentTarget.reset();
+    } catch (error) {
+      handleDriveError(error);
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
-  const handleAddLink = (event) => {
+  const handleAddLink = async (event) => {
     event.preventDefault();
     if (!currentUser) return;
+    if (!driveFolders?.linksId) {
+      handleDriveError("Connect Google Drive before saving links.");
+      return;
+    }
     const form = new FormData(event.currentTarget);
-    const name = String(form.get("name")).trim();
+    const name = String(form.get("name") || "").trim();
     const url = String(form.get("url") || "").trim();
     const notes = String(form.get("notes") || "").trim();
     if (!name || !url) return;
-    const entry = {
-      id: crypto.randomUUID(),
+    const createdAt = new Date().toISOString();
+    const payload = {
       name,
       url,
       notes,
       uploader: currentUser.name,
       uploaderEmail: currentUser.email,
-      createdAt: new Date().toISOString(),
+      createdAt,
     };
-    setLinks((prev) => [...prev, entry]);
-    event.currentTarget.reset();
+    try {
+      setIsProcessing(true);
+      await ensureDriveToken();
+      const response = await window.gapi.client.drive.files.create({
+        resource: {
+          name: safeFileName(name, "json"),
+          parents: [driveFolders.linksId],
+          description: notes,
+          appProperties: {
+            vaultHub: "true",
+            uploaderName: currentUser.name,
+            uploaderEmail: currentUser.email,
+            createdAt,
+          },
+        },
+        media: {
+          mimeType: "application/json",
+          body: new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }),
+        },
+        fields: "id",
+      });
+      const entry = { ...payload, id: response.result.id, fileId: response.result.id };
+      setLinks((prev) =>
+        [...prev, entry].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
+      );
+      event.currentTarget.reset();
+    } catch (error) {
+      handleDriveError(error);
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
   const handleAddScript = async (event) => {
     event.preventDefault();
     if (!currentUser) return;
+    if (!driveFolders?.scriptsId) {
+      handleDriveError("Connect Google Drive before uploading scripts.");
+      return;
+    }
     const formData = new FormData(event.currentTarget);
     const name = String(formData.get("name") || "").trim();
     const notes = String(formData.get("notes") || "").trim();
     const createdAt = new Date().toISOString();
+    const parentDriveId = currentScriptFolderId ?? driveFolders.scriptsId;
+    const parentLogicalId = currentScriptFolderId ?? null;
 
-    if (scriptMode === "file") {
-      if (!scriptFiles.length) return;
-      const file = scriptFiles[0];
-      const buffer = new Uint8Array(await file.arrayBuffer());
-      const entry = {
-        id: crypto.randomUUID(),
-        type: "file",
-        name: name || file.name,
-        originalName: file.name,
-        data: buffer,
-        size: file.size,
-        mimeType: file.type,
-        parentId: currentScriptFolderId ?? null,
-        notes,
-        uploader: currentUser.name,
+    try {
+      setIsProcessing(true);
+      await ensureDriveToken();
+
+      if (scriptMode === "file") {
+        if (!scriptFiles.length) return;
+        const file = scriptFiles[0];
+        const response = await window.gapi.client.drive.files.create({
+          resource: {
+            name: name || file.name,
+            parents: [parentDriveId],
+            description: notes,
+            appProperties: {
+              vaultHub: "true",
+              vaultHubType: "script-file",
+              uploaderName: currentUser.name,
+              uploaderEmail: currentUser.email,
+              createdAt,
+              originalName: file.name,
+            },
+          },
+          media: {
+            mimeType: file.type || "application/octet-stream",
+            body: file,
+          },
+          fields: "id,name,mimeType,size",
+        });
+        const newItem = {
+          id: response.result.id,
+          type: "file",
+          name: name || file.name,
+          originalName: file.name,
+          mimeType: response.result.mimeType || file.type || "application/octet-stream",
+          size: Number(response.result.size || file.size || 0),
+          notes,
+          uploader: currentUser.name,
+          uploaderEmail: currentUser.email,
+          createdAt,
+          parentId: parentLogicalId,
+        };
+        setScripts((prev) => [...prev, newItem]);
+        setScriptFiles([]);
+        event.currentTarget.reset();
+        return;
+      }
+
+      if (!scriptFolderFiles.length) return;
+      const files = Array.from(scriptFolderFiles);
+      const defaultRootName = files[0]?.webkitRelativePath?.split("/")[0] || "Folder";
+      const rootFolder = await createDriveFolder(name || defaultRootName, parentDriveId, {
+        vaultHubType: "script-folder",
+        uploaderName: currentUser.name,
         uploaderEmail: currentUser.email,
         createdAt,
-      };
-      setScripts((prev) => [...prev, entry]);
-      setScriptFiles([]);
-      event.currentTarget.reset();
-      return;
-    }
+      });
+      const createdItems = [
+        {
+          id: rootFolder.id,
+          type: "folder",
+          name: rootFolder.name,
+          notes,
+          uploader: currentUser.name,
+          uploaderEmail: currentUser.email,
+          createdAt,
+          parentId: parentLogicalId,
+        },
+      ];
 
-    if (!scriptFolderFiles.length) return;
-    const files = scriptFolderFiles;
-    const created = [];
-    const rootId = crypto.randomUUID();
-    const rootName = name || files[0].webkitRelativePath.split("/")[0] || "Folder";
-    const rootFolder = {
-      id: rootId,
-      type: "folder",
-      name: rootName,
-      parentId: currentScriptFolderId ?? null,
-      notes,
-      uploader: currentUser.name,
-      uploaderEmail: currentUser.email,
-      createdAt,
-    };
-    created.push(rootFolder);
+      const pathToFolderId = new Map();
+      pathToFolderId.set("", rootFolder.id);
 
-    const pathMap = new Map();
-    pathMap.set("", rootId);
-
-    const ensurePath = (parts) => {
-      let parent = rootId;
-      let key = "";
-      parts.forEach((segment) => {
-        key = `${key}/${segment}`;
-        if (!pathMap.has(key)) {
-          const folder = {
-            id: crypto.randomUUID(),
-            type: "folder",
-            name: segment,
-            parentId: parent,
-            notes,
-            uploader: currentUser.name,
-            uploaderEmail: currentUser.email,
-            createdAt,
-          };
-          created.push(folder);
-          pathMap.set(key, folder.id);
-          parent = folder.id;
-        } else {
-          parent = pathMap.get(key);
+      for (const file of files) {
+        const rawPath = file.webkitRelativePath || file.name;
+        const parts = rawPath.split("/");
+        if (parts.length > 1) {
+          parts.shift();
         }
-      });
-      return parent;
-    };
+        const fileName = parts.pop() || file.name;
+        let currentPath = "";
+        for (const segment of parts) {
+          currentPath = currentPath ? `${currentPath}/${segment}` : segment;
+          if (!pathToFolderId.has(currentPath)) {
+            const parentPath = currentPath.split("/").slice(0, -1).join("/");
+            const parentId = parentPath ? pathToFolderId.get(parentPath) : rootFolder.id;
+            const folder = await createDriveFolder(segment, parentId, {
+              vaultHubType: "script-folder",
+              uploaderName: currentUser.name,
+              uploaderEmail: currentUser.email,
+              createdAt,
+            });
+            pathToFolderId.set(currentPath, folder.id);
+            createdItems.push({
+              id: folder.id,
+              type: "folder",
+              name: segment,
+              notes,
+              uploader: currentUser.name,
+              uploaderEmail: currentUser.email,
+              createdAt,
+              parentId: parentPath ? pathToFolderId.get(parentPath) : rootFolder.id,
+            });
+          }
+        }
+        const parentPathKey = parts.join("/");
+        const parentForFile = parentPathKey ? pathToFolderId.get(parentPathKey) : rootFolder.id;
+        const fileResponse = await window.gapi.client.drive.files.create({
+          resource: {
+            name: fileName,
+            parents: [parentForFile],
+            description: notes,
+            appProperties: {
+              vaultHub: "true",
+              vaultHubType: "script-file",
+              uploaderName: currentUser.name,
+              uploaderEmail: currentUser.email,
+              createdAt,
+              originalName: file.name,
+            },
+          },
+          media: {
+            mimeType: file.type || "application/octet-stream",
+            body: file,
+          },
+          fields: "id,name,mimeType,size",
+        });
+        createdItems.push({
+          id: fileResponse.result.id,
+          type: "file",
+          name: fileName,
+          originalName: file.name,
+          mimeType: fileResponse.result.mimeType || file.type || "application/octet-stream",
+          size: Number(fileResponse.result.size || file.size || 0),
+          notes,
+          uploader: currentUser.name,
+          uploaderEmail: currentUser.email,
+          createdAt,
+          parentId: parentForFile,
+        });
+      }
 
-    for (const file of files) {
-      const path = file.webkitRelativePath.split("/");
-      path.shift();
-      const fileName = path.pop();
-      const parent = ensurePath(path);
-      const buffer = new Uint8Array(await file.arrayBuffer());
-      created.push({
-        id: crypto.randomUUID(),
-        type: "file",
-        name: fileName,
-        originalName: file.name,
-        data: buffer,
-        size: file.size,
-        mimeType: file.type,
-        parentId: parent,
-        notes,
-        uploader: currentUser.name,
-        uploaderEmail: currentUser.email,
-        createdAt,
-      });
+      setScripts((prev) => [...prev, ...createdItems]);
+      setScriptFolderFiles([]);
+      event.currentTarget.reset();
+    } catch (error) {
+      handleDriveError(error);
+    } finally {
+      setIsProcessing(false);
     }
-
-    setScripts((prev) => [...prev, ...created]);
-    setScriptFolderFiles([]);
-    event.currentTarget.reset();
   };
   const toggleSelection = (category, id) => {
     setSelectedItems((prev) => {
@@ -487,42 +1013,59 @@ export default function App() {
     });
   };
 
-  const removeScriptItem = (id) => {
-    const ids = new Set([id]);
-    const queue = [id];
-    while (queue.length) {
-      const current = queue.shift();
-      scripts.forEach((item) => {
-        if (item.parentId === current) {
-          ids.add(item.id);
-          queue.push(item.id);
+  const removeScriptItem = useCallback(
+    (id) => {
+      const ids = new Set([id]);
+      const queue = [id];
+      while (queue.length) {
+        const current = queue.shift();
+        scripts.forEach((item) => {
+          if (item.parentId === current && !ids.has(item.id)) {
+            ids.add(item.id);
+            queue.push(item.id);
+          }
+        });
+      }
+      setScripts((prev) => prev.filter((item) => !ids.has(item.id)));
+      setSelectedItems((prev) => prev.filter((item) => !(item.category === "scripts" && ids.has(item.id))));
+      setPreview((prevPreview) => {
+        if (prevPreview && prevPreview.category === "scripts" && ids.has(prevPreview.item.id)) {
+          return null;
         }
+        return prevPreview;
       });
-    }
-    setScripts((prev) => prev.filter((item) => !ids.has(item.id)));
-    setSelectedItems((prev) => prev.filter((item) => !(item.category === "scripts" && ids.has(item.id))));
-    if (preview && preview.category === "scripts" && ids.has(preview.item.id)) {
-      setPreview(null);
-    }
-    if (ids.has(currentScriptFolderId)) {
-      setCurrentScriptFolderId(null);
-    }
-  };
+      setCurrentScriptFolderId((currentId) => (currentId && ids.has(currentId) ? null : currentId));
+    },
+    [scripts]
+  );
 
-  const handleDelete = (category, id) => {
-    if (category === "prompts") {
-      setPrompts((prev) => prev.filter((item) => item.id !== id));
-      setSelectedItems((prev) => prev.filter((item) => !(item.category === category && item.id === id)));
-      if (preview && preview.category === category && preview.item.id === id) setPreview(null);
-      return;
+  const handleDelete = async (category, id) => {
+    try {
+      setIsProcessing(true);
+      await ensureDriveToken();
+      await window.gapi.client.drive.files.delete({ fileId: id });
+      if (category === "prompts") {
+        setPrompts((prev) => prev.filter((item) => item.id !== id));
+        setSelectedItems((prev) => prev.filter((item) => !(item.category === category && item.id === id)));
+        setPreview((prevPreview) =>
+          prevPreview && prevPreview.category === category && prevPreview.item.id === id ? null : prevPreview
+        );
+        return;
+      }
+      if (category === "links") {
+        setLinks((prev) => prev.filter((item) => item.id !== id));
+        setSelectedItems((prev) => prev.filter((item) => !(item.category === category && item.id === id)));
+        setPreview((prevPreview) =>
+          prevPreview && prevPreview.category === category && prevPreview.item.id === id ? null : prevPreview
+        );
+        return;
+      }
+      removeScriptItem(id);
+    } catch (error) {
+      handleDriveError(error);
+    } finally {
+      setIsProcessing(false);
     }
-    if (category === "links") {
-      setLinks((prev) => prev.filter((item) => item.id !== id));
-      setSelectedItems((prev) => prev.filter((item) => !(item.category === category && item.id === id)));
-      if (preview && preview.category === category && preview.item.id === id) setPreview(null);
-      return;
-    }
-    removeScriptItem(id);
   };
 
   const scriptPath = (item) => {
@@ -535,119 +1078,159 @@ export default function App() {
     return segments.reverse();
   };
 
-  const gatherScriptEntries = (item, prefix = "") => {
-    const entries = [];
-    const namePath = [...(prefix ? [prefix] : []), item.name].join("/");
-    if (item.type === "folder") {
-      const folderPath = `${namePath}/`;
-      entries.push({
-        path: folderPath,
-        data: new Uint8Array(0),
-        crc: 0,
-        isDirectory: true,
-        date: new Date(item.createdAt),
-        externalAttr: 0x10 << 16,
-      });
-      scripts
-        .filter((child) => child.parentId === item.id)
-        .forEach((child) => {
-          entries.push(...gatherScriptEntries(child, namePath));
+  const gatherScriptEntries = useCallback(
+    async (item, prefixSegments = []) => {
+      const entries = [];
+      const pathSegments = [...prefixSegments, item.name];
+      if (item.type === "folder") {
+        entries.push({
+          path: `${pathSegments.join("/")}/`,
+          data: new Uint8Array(0),
+          crc: 0,
+          isDirectory: true,
+          date: new Date(item.createdAt),
+          externalAttr: 0x10 << 16,
         });
-    } else {
-      const data = item.data ?? new Uint8Array(0);
+        const children = scripts.filter((child) => child.parentId === item.id);
+        for (const child of children) {
+          const childEntries = await gatherScriptEntries(child, pathSegments);
+          entries.push(...childEntries);
+        }
+        return entries;
+      }
+      const response = await driveApiFetch(
+        `https://www.googleapis.com/drive/v3/files/${item.id}?alt=media`
+      );
+      const buffer = new Uint8Array(await response.arrayBuffer());
       entries.push({
-        path: namePath,
-        data,
-        crc: crc32(data),
+        path: pathSegments.join("/"),
+        data: buffer,
+        crc: crc32(buffer),
         date: new Date(item.createdAt),
       });
+      return entries;
+    },
+    [driveApiFetch, scripts]
+  );
+
+  const handleDownload = async (category, item) => {
+    try {
+      setIsProcessing(true);
+      if (category === "prompts") {
+        const content = `Name: ${item.name}\nDescription: ${item.description || "-"}\nNotes: ${item.notes || "-"}\nUploaded by: ${item.uploader} (${item.uploaderEmail})`;
+        downloadBlob(new Blob([content], { type: "text/plain" }), safeFileName(item.name, "txt"));
+        return;
+      }
+      if (category === "links") {
+        const content = `Name: ${item.name}\nURL: ${item.url}\nNotes: ${item.notes || "-"}\nUploaded by: ${item.uploader} (${item.uploaderEmail})`;
+        downloadBlob(new Blob([content], { type: "text/plain" }), safeFileName(item.name, "txt"));
+        return;
+      }
+      if (item.type === "file") {
+        const response = await driveApiFetch(
+          `https://www.googleapis.com/drive/v3/files/${item.id}?alt=media`
+        );
+        const blob = await response.blob();
+        downloadBlob(blob, item.name);
+        return;
+      }
+      const entries = await gatherScriptEntries(item);
+      const zip = createZip(entries);
+      downloadBlob(zip, `${safeFileName(item.name)}.zip`);
+    } catch (error) {
+      handleDriveError(error);
+    } finally {
+      setIsProcessing(false);
     }
-    return entries;
   };
 
-  const handleDownload = (category, item) => {
-    if (category === "prompts") {
-      const content = `Name: ${item.name}\nDescription: ${item.description || "-"}\nNotes: ${item.notes || "-"}\nUploaded by: ${item.uploader} (${item.uploaderEmail})`;
-      downloadBlob(new Blob([content], { type: "text/plain" }), safeFileName(item.name, "txt"));
-      return;
-    }
-    if (category === "links") {
-      const content = `Name: ${item.name}\nURL: ${item.url}\nNotes: ${item.notes || "-"}\nUploaded by: ${item.uploader} (${item.uploaderEmail})`;
-      downloadBlob(new Blob([content], { type: "text/plain" }), safeFileName(item.name, "txt"));
-      return;
-    }
-    if (item.type === "file") {
-      const blob = new Blob([item.data], { type: item.mimeType || "application/octet-stream" });
-      downloadBlob(blob, item.name);
-      return;
-    }
-    const entries = gatherScriptEntries(item);
-    const zip = createZip(entries);
-    downloadBlob(zip, `${safeFileName(item.name)}.zip`);
-  };
-
-  const gatherSelectionEntries = () => {
+  const gatherSelectionEntries = useCallback(async () => {
     const entries = [];
     const added = new Set();
 
-    const addEntry = (path, data, date, isDirectory = false) => {
-      if (added.has(path)) return;
-      added.add(path);
-      entries.push({
-        path,
-        data,
-        crc: isDirectory ? 0 : crc32(data),
-        date,
-        isDirectory,
-        externalAttr: isDirectory ? 0x10 << 16 : 0,
-      });
+    const addEntry = (entry) => {
+      if (added.has(entry.path)) return;
+      added.add(entry.path);
+      entries.push(entry);
     };
 
-    selectedItems.forEach(({ category, id }) => {
+    for (const { category, id } of selectedItems) {
       if (category === "prompts") {
         const prompt = prompts.find((entry) => entry.id === id);
-        if (!prompt) return;
+        if (!prompt) continue;
         const filename = `Prompts/${safeFileName(prompt.name, "txt")}`;
         const content = textEncoder.encode(
           `Name: ${prompt.name}\nDescription: ${prompt.description || "-"}\nNotes: ${prompt.notes || "-"}\nUploaded by: ${prompt.uploader}`
         );
-        addEntry(filename, content, new Date(prompt.createdAt));
-        return;
+        addEntry({
+          path: filename,
+          data: content,
+          crc: crc32(content),
+          date: new Date(prompt.createdAt),
+        });
+        continue;
       }
       if (category === "links") {
         const link = links.find((entry) => entry.id === id);
-        if (!link) return;
+        if (!link) continue;
         const filename = `Links/${safeFileName(link.name, "txt")}`;
         const content = textEncoder.encode(
           `Name: ${link.name}\nURL: ${link.url}\nNotes: ${link.notes || "-"}\nUploaded by: ${link.uploader}`
         );
-        addEntry(filename, content, new Date(link.createdAt));
-        return;
+        addEntry({
+          path: filename,
+          data: content,
+          crc: crc32(content),
+          date: new Date(link.createdAt),
+        });
+        continue;
       }
       const script = scriptsById.get(id);
-      if (!script) return;
-      const baseSegments = scriptPath(script);
+      if (!script) continue;
       if (script.type === "file") {
-        const path = ["Scripts", ...baseSegments].join("/");
-        addEntry(path, script.data ?? new Uint8Array(0), new Date(script.createdAt));
-        return;
+        const response = await driveApiFetch(
+          `https://www.googleapis.com/drive/v3/files/${script.id}?alt=media`
+        );
+        const buffer = new Uint8Array(await response.arrayBuffer());
+        addEntry({
+          path: ["Scripts", ...scriptPath(script)].join("/"),
+          data: buffer,
+          crc: crc32(buffer),
+          date: new Date(script.createdAt),
+        });
+        continue;
       }
-      const entriesFromFolder = gatherScriptEntries(script, ["Scripts", ...baseSegments.slice(0, -1)].join("/"));
-      entriesFromFolder.forEach((entry) => addEntry(entry.path, entry.data, entry.date, entry.isDirectory));
-    });
+      const baseSegments = ["Scripts", ...scriptPath(script).slice(0, -1)];
+      const entriesFromFolder = await gatherScriptEntries(script, baseSegments);
+      entriesFromFolder.forEach(addEntry);
+    }
 
     return entries;
-  };
+  }, [
+    gatherScriptEntries,
+    driveApiFetch,
+    links,
+    prompts,
+    scriptsById,
+    selectedItems,
+  ]);
 
-  const handleBulkDownload = () => {
+  const handleBulkDownload = async () => {
     if (!selectedItems.length) return;
-    const entries = gatherSelectionEntries();
-    if (!entries.length) return;
-    const zip = createZip(entries);
-    downloadBlob(zip, `vault-bulk-download-${Date.now()}.zip`);
+    try {
+      setIsProcessing(true);
+      const entries = await gatherSelectionEntries();
+      if (!entries.length) return;
+      const zip = createZip(entries);
+      downloadBlob(zip, `vault-bulk-download-${Date.now()}.zip`);
+    } catch (error) {
+      handleDriveError(error);
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
-  const handleEditSubmit = (event) => {
+  const handleEditSubmit = async (event) => {
     event.preventDefault();
     if (!editingItem) return;
     const form = new FormData(event.currentTarget);
@@ -655,31 +1238,120 @@ export default function App() {
     const notes = String(form.get("notes") || "").trim();
     if (!name) return;
 
-    if (editingItem.category === "prompts") {
-      setPrompts((prev) =>
-        prev.map((entry) =>
-          entry.id === editingItem.item.id
-            ? { ...entry, name, description: String(form.get("description") || "").trim(), notes }
-            : entry
-        )
-      );
-    } else if (editingItem.category === "links") {
-      setLinks((prev) =>
-        prev.map((entry) =>
-          entry.id === editingItem.item.id
-            ? { ...entry, name, url: String(form.get("url") || "").trim(), notes }
-            : entry
-        )
-      );
-    } else if (editingItem.category === "scripts") {
-      setScripts((prev) => prev.map((entry) => (entry.id === editingItem.item.id ? { ...entry, name, notes } : entry)));
-    }
+    try {
+      setIsProcessing(true);
+      await ensureDriveToken();
 
-    if (preview && preview.category === editingItem.category && preview.item.id === editingItem.item.id) {
-      setPreview({ category: preview.category, item: { ...preview.item, name, notes } });
-    }
+      if (editingItem.category === "prompts") {
+        const description = String(form.get("description") || "").trim();
+        const payload = {
+          name,
+          description,
+          notes,
+          uploader: editingItem.item.uploader,
+          uploaderEmail: editingItem.item.uploaderEmail,
+          createdAt: editingItem.item.createdAt,
+        };
+        await window.gapi.client.drive.files.update({
+          fileId: editingItem.item.id,
+          resource: {
+            name: safeFileName(name, "json"),
+            description: notes,
+          },
+          media: {
+            mimeType: "application/json",
+            body: new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }),
+          },
+        });
+        setPrompts((prev) =>
+          prev.map((entry) =>
+            entry.id === editingItem.item.id ? { ...entry, name, description, notes } : entry
+          )
+        );
+        setPreview((prevPreview) => {
+          if (!prevPreview || prevPreview.category !== "prompts" || prevPreview.item.id !== editingItem.item.id) {
+            return prevPreview;
+          }
+          return {
+            ...prevPreview,
+            item: { ...prevPreview.item, name, description, notes },
+          };
+        });
+      } else if (editingItem.category === "links") {
+        const url = String(form.get("url") || "").trim();
+        const payload = {
+          name,
+          url,
+          notes,
+          uploader: editingItem.item.uploader,
+          uploaderEmail: editingItem.item.uploaderEmail,
+          createdAt: editingItem.item.createdAt,
+        };
+        await window.gapi.client.drive.files.update({
+          fileId: editingItem.item.id,
+          resource: {
+            name: safeFileName(name, "json"),
+            description: notes,
+          },
+          media: {
+            mimeType: "application/json",
+            body: new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }),
+          },
+        });
+        setLinks((prev) =>
+          prev.map((entry) => (entry.id === editingItem.item.id ? { ...entry, name, url, notes } : entry))
+        );
+        setPreview((prevPreview) => {
+          if (!prevPreview || prevPreview.category !== "links" || prevPreview.item.id !== editingItem.item.id) {
+            return prevPreview;
+          }
+          return {
+            ...prevPreview,
+            item: { ...prevPreview.item, name, url, notes },
+          };
+        });
+      } else if (editingItem.category === "scripts") {
+        await window.gapi.client.drive.files.update({
+          fileId: editingItem.item.id,
+          resource: {
+            name,
+            description: notes,
+          },
+        });
+        setScripts((prev) =>
+          prev.map((entry) =>
+            entry.id === editingItem.item.id
+              ? {
+                  ...entry,
+                  name,
+                  notes,
+                  ...(entry.type === "file" ? { originalName: name } : {}),
+                }
+              : entry
+          )
+        );
+        setPreview((prevPreview) => {
+          if (!prevPreview || prevPreview.category !== "scripts" || prevPreview.item.id !== editingItem.item.id) {
+            return prevPreview;
+          }
+          return {
+            ...prevPreview,
+            item: {
+              ...prevPreview.item,
+              name,
+              notes,
+              ...(prevPreview.item.type === "file" ? { originalName: name } : {}),
+            },
+          };
+        });
+      }
 
-    setEditingItem(null);
+      setEditingItem(null);
+    } catch (error) {
+      handleDriveError(error);
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
   const openContextMenu = (event, category, item) => {
@@ -752,29 +1424,32 @@ export default function App() {
         className="fixed z-50 w-44 overflow-hidden rounded-lg border border-white/10 bg-[#161b22] shadow-2xl"
       >
         <button
-          onClick={() => {
-            handleDownload(contextMenu.category, contextMenu.item);
+          disabled={isBusy || !driveReadyForActions}
+          onClick={async () => {
+            await handleDownload(contextMenu.category, contextMenu.item);
             setContextMenu(null);
           }}
-          className="flex w-full items-center gap-2 px-4 py-2 text-sm text-slate-200 transition hover:bg-white/10"
+          className="flex w-full items-center gap-2 px-4 py-2 text-sm text-slate-200 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
         >
           <Download className="h-4 w-4" /> Download
         </button>
         <button
+          disabled={isBusy || !driveReadyForActions}
           onClick={() => {
             setEditingItem({ category: contextMenu.category, item: contextMenu.item });
             setContextMenu(null);
           }}
-          className="flex w-full items-center gap-2 px-4 py-2 text-sm text-slate-200 transition hover:bg-white/10"
+          className="flex w-full items-center gap-2 px-4 py-2 text-sm text-slate-200 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
         >
           <PencilLine className="h-4 w-4" /> Edit
         </button>
         <button
-          onClick={() => {
-            handleDelete(contextMenu.category, contextMenu.item.id);
+          disabled={isBusy || !driveReadyForActions}
+          onClick={async () => {
+            await handleDelete(contextMenu.category, contextMenu.item.id);
             setContextMenu(null);
           }}
-          className="flex w-full items-center gap-2 px-4 py-2 text-sm text-rose-300 transition hover:bg-rose-500/20"
+          className="flex w-full items-center gap-2 px-4 py-2 text-sm text-rose-300 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-50"
         >
           <Trash2 className="h-4 w-4" /> Delete
         </button>
@@ -899,13 +1574,18 @@ export default function App() {
           )}
 
           <div className="flex flex-wrap items-center gap-2">
-            <Button onClick={() => handleDownload(category, item)} className="bg-[#1f6feb] text-white hover:bg-[#388bfd]">
+            <Button
+              onClick={async () => handleDownload(category, item)}
+              disabled={isBusy || !driveReadyForActions}
+              className="bg-[#1f6feb] text-white hover:bg-[#388bfd] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
+            >
               <Download className="mr-2 h-4 w-4" /> Download
             </Button>
             <Button
               variant="outline"
               onClick={() => setEditingItem({ category, item })}
-              className="border-white/10 bg-white/5 text-white hover:bg-white/10"
+              disabled={isBusy}
+              className="border-white/10 bg-white/5 text-white hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <PencilLine className="mr-2 h-4 w-4" /> Edit details
             </Button>
@@ -1207,16 +1887,51 @@ export default function App() {
                   <p className="text-sm text-slate-400">Double-click folders to open them, right-click items for quick actions.</p>
                 </div>
               </div>
-              <div className="flex flex-wrap items-center gap-3">
+              <div className="flex flex-wrap items-center gap-3 text-sm">
                 <Button
-                  onClick={handleBulkDownload}
-                  disabled={!selectedItems.length}
+                  onClick={() => handleDriveConnect()}
+                  disabled={!driveClientReady || missingDriveCredentials || isBusy}
+                  className={`${
+                    driveConnected
+                      ? "border border-white/10 bg-white/5 text-white hover:bg-white/10"
+                      : "bg-[#1f6feb] text-white hover:bg-[#388bfd]"
+                  } disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500`}
+                >
+                  <HardDrive className="mr-2 h-4 w-4" />
+                  {isBusy
+                    ? "Syncing..."
+                    : driveConnected
+                    ? "Refresh Drive"
+                    : "Connect Google Drive"}
+                </Button>
+                {driveProfile && (
+                  <span className="text-xs text-slate-400">
+                    Connected as <span className="text-slate-200">{driveProfile.displayName}</span>
+                    {driveProfile.emailAddress ? ` (${driveProfile.emailAddress})` : ""}
+                  </span>
+                )}
+                <Button
+                  onClick={() => handleBulkDownload()}
+                  disabled={!selectedItems.length || isBusy || !driveReadyForActions}
                   className="bg-[#238636] text-white hover:bg-[#2ea043] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
                 >
                   <Download className="mr-2 h-4 w-4" /> Bulk download ({selectedItems.length})
                 </Button>
               </div>
             </div>
+
+            {driveError && (
+              <div className="mt-4 rounded-2xl border border-rose-500/40 bg-rose-500/10 p-4 text-sm text-rose-200">
+                {driveError}
+              </div>
+            )}
+            {!driveError && !driveReadyForActions && !isBusy && (
+              <div className="mt-4 rounded-2xl border border-amber-400/30 bg-amber-400/10 p-4 text-sm text-amber-100">
+                {missingDriveCredentials
+                  ? "Add your Google API credentials to enable Google Drive storage."
+                  : "Connect Google Drive to start uploading prompts, scripts, and links."}
+              </div>
+            )}
 
             <div className="mt-6 grid gap-6 lg:grid-cols-[1.6fr,1fr]">
               <div className="space-y-6">
@@ -1251,7 +1966,11 @@ export default function App() {
                       <label className="text-xs uppercase tracking-wide text-slate-400">Notes</label>
                       <Textarea name="notes" placeholder="Paste the full prompt or any reminders" className="mt-1 min-h-[120px] border-white/10 bg-black/40 text-white" />
                     </div>
-                    <Button type="submit" className="bg-[#238636] text-white hover:bg-[#2ea043]">
+                    <Button
+                      type="submit"
+                      disabled={!driveReadyForActions || isBusy}
+                      className="bg-[#238636] text-white hover:bg-[#2ea043] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
+                    >
                       Save prompt
                     </Button>
                   </form>
@@ -1291,8 +2010,9 @@ export default function App() {
                         <label className="text-xs uppercase tracking-wide text-slate-400">Choose file</label>
                         <Input
                           type="file"
+                          disabled={!driveReadyForActions || isBusy}
                           onChange={(event) => setScriptFiles(Array.from(event.target.files || []))}
-                          className="mt-1 border-white/10 bg-black/40 text-white file:mr-3 file:rounded-lg file:border-0 file:bg-[#1f6feb] file:px-4 file:py-2 file:text-sm file:text-white"
+                          className="mt-1 border-white/10 bg-black/40 text-white file:mr-3 file:rounded-lg file:border-0 file:bg-[#1f6feb] file:px-4 file:py-2 file:text-sm file:text-white disabled:cursor-not-allowed"
                         />
                         {scriptFiles.length > 0 && (
                           <p className="mt-2 text-xs text-slate-400">Selected: {scriptFiles[0].name}</p>
@@ -1305,8 +2025,9 @@ export default function App() {
                           ref={folderInputRef}
                           type="file"
                           multiple
+                          disabled={!driveReadyForActions || isBusy}
                           onChange={(event) => setScriptFolderFiles(Array.from(event.target.files || []))}
-                          className="mt-1 border-white/10 bg-black/40 text-white file:mr-3 file:rounded-lg file:border-0 file:bg-[#1f6feb] file:px-4 file:py-2 file:text-sm file:text-white"
+                          className="mt-1 border-white/10 bg-black/40 text-white file:mr-3 file:rounded-lg file:border-0 file:bg-[#1f6feb] file:px-4 file:py-2 file:text-sm file:text-white disabled:cursor-not-allowed"
                         />
                         {scriptFolderFiles.length > 0 && (
                           <p className="mt-2 text-xs text-slate-400">{scriptFolderFiles.length} items ready to upload</p>
@@ -1317,7 +2038,11 @@ export default function App() {
                       <label className="text-xs uppercase tracking-wide text-slate-400">Notes</label>
                       <Textarea name="notes" placeholder="Context, setup steps, secrets, etc." className="mt-1 min-h-[120px] border-white/10 bg-black/40 text-white" />
                     </div>
-                    <Button type="submit" className="bg-[#1f6feb] text-white hover:bg-[#388bfd]">
+                    <Button
+                      type="submit"
+                      disabled={!driveReadyForActions || isBusy}
+                      className="bg-[#1f6feb] text-white hover:bg-[#388bfd] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
+                    >
                       Upload
                     </Button>
                   </form>
@@ -1340,7 +2065,11 @@ export default function App() {
                       <label className="text-xs uppercase tracking-wide text-slate-400">Notes</label>
                       <Textarea name="notes" placeholder="Why this link matters" className="mt-1 min-h-[120px] border-white/10 bg-black/40 text-white" />
                     </div>
-                    <Button type="submit" className="bg-[#bf3989] text-white hover:bg-[#f778ba]">
+                    <Button
+                      type="submit"
+                      disabled={!driveReadyForActions || isBusy}
+                      className="bg-[#bf3989] text-white hover:bg-[#f778ba] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
+                    >
                       Save link
                     </Button>
                   </form>
