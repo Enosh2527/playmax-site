@@ -377,6 +377,19 @@ export default function App() {
           setDriveConnected(true);
           resolve(accessToken);
         };
+        tokenClientRef.current.error_callback = (error) => {
+          const code = error?.error || "authorization_error";
+          const description = error?.error_description || "Google Drive authorization failed.";
+          if (code === "redirect_uri_mismatch") {
+            reject(
+              new Error(
+                "Google rejected the Drive request because the authorized redirect URIs on the OAuth client do not include this site. Add your deployment URL (and http://localhost:5173 for local testing) to the Authorized JavaScript origins in the Google Cloud console."
+              )
+            );
+            return;
+          }
+          reject(new Error(description));
+        };
         try {
           tokenClientRef.current.requestAccessToken({ prompt: promptForConsent ? "consent" : "" });
         } catch (error) {
