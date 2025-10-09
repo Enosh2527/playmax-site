@@ -1048,7 +1048,8 @@ export default function App() {
   const handleAddPrompt = async (event) => {
     event.preventDefault();
     if (!currentUser || !storageReady) return;
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const name = String(form.get("name") || "").trim();
     const description = String(form.get("description") || "").trim();
     const notes = String(form.get("notes") || "").trim();
@@ -1078,7 +1079,7 @@ export default function App() {
       setPrompts((prev) =>
         [...prev, entry].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
       );
-      event.currentTarget.reset();
+      formElement?.reset();
       setVaultError("");
     } catch (error) {
       console.error("Failed to add prompt", error);
@@ -1093,7 +1094,8 @@ export default function App() {
   const handleAddLink = async (event) => {
     event.preventDefault();
     if (!currentUser || !storageReady) return;
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const name = String(form.get("name") || "").trim();
     const url = String(form.get("url") || "").trim();
     const notes = String(form.get("notes") || "").trim();
@@ -1123,7 +1125,7 @@ export default function App() {
       setLinks((prev) =>
         [...prev, entry].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
       );
-      event.currentTarget.reset();
+      formElement?.reset();
       setVaultError("");
     } catch (error) {
       console.error("Failed to add link", error);
@@ -1205,7 +1207,8 @@ export default function App() {
   const handleAddScript = async (event) => {
     event.preventDefault();
     if (!currentUser || !storageReady) return;
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const name = String(form.get("name") || "").trim();
     const notes = String(form.get("notes") || "").trim();
     const createdAt = new Date().toISOString();
@@ -1244,7 +1247,7 @@ export default function App() {
         });
         setScripts((prev) => [...prev, entry]);
         setScriptFiles([]);
-        event.currentTarget.reset();
+        formElement?.reset();
         setVaultError("");
         return;
       }
@@ -1269,7 +1272,7 @@ export default function App() {
       });
       setScripts((prev) => [...prev, ...inserted]);
       setScriptFolderFiles([]);
-      event.currentTarget.reset();
+      formElement?.reset();
       setVaultError("");
     } catch (error) {
       console.error("Failed to store scripts", error);
@@ -2147,7 +2150,8 @@ export default function App() {
               onSubmit={async (event) => {
                 event.preventDefault();
                 if (!storageReady) return;
-                const form = new FormData(event.currentTarget);
+                const formElement = event.currentTarget;
+                const form = new FormData(formElement);
                 const email = String(form.get("email") || "").trim().toLowerCase();
                 if (!email || allowedEmails.includes(email)) return;
                 try {
@@ -2168,7 +2172,7 @@ export default function App() {
                   setAllowedEmails((prev) =>
                     Array.from(new Set([...prev, email])).sort((a, b) => a.localeCompare(b))
                   );
-                  event.currentTarget.reset();
+                  formElement?.reset();
                 } catch (error) {
                   console.error("Failed to store allowed email", error);
                   setVaultError(
