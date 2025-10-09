@@ -11,6 +11,17 @@ npm run dev
 
 Then open the URL printed by Vite (usually http://localhost:5173).
 
+### Required environment variables
+
+Create a `.env.local` file in the project root with your Supabase credentials before starting the dev server:
+
+```
+VITE_SUPABASE_URL=your-project-url
+VITE_SUPABASE_ANON_KEY=your-public-anon-key
+```
+
+See [Supabase storage setup](#supabase-storage-setup-free-tier) for table definitions and a full walkthrough.
+
 ## Default access
 
 Two administrator accounts are seeded so you can explore the workspace immediately:
@@ -34,60 +45,62 @@ npm run draft
 
 The app will be available on http://localhost:5173 with the draft ribbon displayed across the top of the dashboard.
 
-## Google Drive storage setup
+## Supabase storage setup (free tier)
 
-VaultHub persists prompts, scripts, and links to a dedicated folder in your Google Drive. The ready-to-use build already embeds production credentials so you can connect immediately:
+VaultHub now uses [Supabase](https://supabase.com) as its zero-cost cloud vault. Every prompt, link, and script upload is written to your project's Postgres database through the REST API. To get started:
 
-```
-VITE_GOOGLE_CLIENT_ID=952287910237-kqtdm3ls26n054t3eoelmi901filbmj0.apps.googleusercontent.com
-VITE_GOOGLE_API_KEY=AIzaSyALZ-76IMlrMHlRv0oNurLBfmM_mK_R9Ac
-```
+1. Create a Supabase project (the free tier includes 500 MB of database storage which is plenty for prompt text and small script bundles).
+2. In the Supabase dashboard, create three tables using the SQL editor:
 
-If you'd like to supply your own keys instead, follow these steps before running the project locally:
+   ```sql
+   create table if not exists public.prompts (
+     id uuid primary key,
+     name text not null,
+     description text,
+     notes text,
+     uploader text,
+     uploader_email text,
+     created_at timestamptz default now()
+   );
 
-1. Visit the [Google Cloud Console](https://console.cloud.google.com/) and create a project (or reuse an existing one).
-2. Enable the **Google Drive API** for that project.
-3. Create OAuth 2.0 credentials of type **Web application** with the following settings:
-   - Add each environment (for example `http://localhost:5173`, `http://localhost:4173`, your production hostname, and any deploy preview URLs) to **Authorized JavaScript origins**.
-   - Leave the redirect URI list empty—VaultHub uses the token-based flow and does not require redirects.
-   Copy the generated **Client ID**.
-4. Create an API key for the same project (or reuse an existing key) and restrict it to the Google Drive API if desired.
-5. Create a `.env.local` file in the project root with your credentials:
+   create table if not exists public.links (
+     id uuid primary key,
+     name text not null,
+     url text not null,
+     notes text,
+     uploader text,
+     uploader_email text,
+     created_at timestamptz default now()
+   );
 
-   ```bash
-   VITE_GOOGLE_CLIENT_ID=your-oauth-client-id.apps.googleusercontent.com
-   VITE_GOOGLE_API_KEY=your-google-api-key
+   create table if not exists public.scripts (
+     id uuid primary key,
+     type text not null,
+     name text not null,
+     original_name text,
+     notes text,
+     uploader text,
+     uploader_email text,
+     created_at timestamptz default now(),
+     parent_id uuid,
+     file_mime text,
+     file_size bigint,
+     file_content text
+   );
    ```
 
-6. Restart the dev server (`npm run dev`). Once you log in to the dashboard, click **Connect Google Drive** to authorize the app. A folder named **VaultHub Workspace** will be created automatically with Prompts, Scripts, and Links subfolders for storing your uploads.
+   The app stores script files and folders in this table. Files are base64 encoded and remain lightweight enough for Supabase's free limits.
+3. Open **Project Settings → API** and copy the **Project URL** and **anon public key**.
+4. Create a `.env.local` file with those values so the front-end can talk to your project:
 
-## Browser vault storage (zero-cost alternative)
+   ```bash
+   VITE_SUPABASE_URL=https://your-project.supabase.co
+   VITE_SUPABASE_ANON_KEY=your-public-anon-key
+   ```
 
-If you're running into repeated Drive authorization errors or simply want a private workspace, switch the **Workspace vault** toggle to **Browser vault**. This mode keeps every prompt, script, and link inside the current browser via `localStorage`, so no Google Cloud setup is required.
+5. Restart the dev server. The dashboard will show a “Connected to Supabase” badge once the credentials are valid. Bulk downloads, context menus, and folder uploads all operate directly against your Supabase tables.
 
-- The browser vault is enabled by default for new visitors. Use the toggle in the dashboard header to hop back to Google Drive whenever you're ready to sync across accounts.
-- Data never leaves the device. Each browser profile gets its own vault; clear it by opening the developer console and running `localStorage.removeItem('vaulthub-local-workspace-v1')`.
-- Bulk downloads, folder uploads, context actions, and previews behave identically to Drive mode—the app compresses the locally stored bytes into ZIP files on demand when you download.
-
-### Fixing the `redirect_uri_mismatch` error
-
-If Google blocks the popup with a `redirect_uri_mismatch` message, it means the current site URL hasn't been registered on the OAuth client. Grab the exact origin from your browser's address bar (for example `https://652c1a57ab3a12345--playmax.netlify.app`) and add it to the **Authorized JavaScript origins** list for the Drive OAuth credentials. Save the change, wait a few seconds for it to propagate, then try connecting again.
-
-### Troubleshooting Google Drive connection failures
-
-When Drive rejects a request, the dashboard now keeps the exact error text Google returned and surfaces it directly below the **Workspace vault** header. You'll also see the raw `reason`, `status`, and `code` fields so support can pinpoint the fix quickly. A few common resolutions:
-
-- **`insufficientPermissions` / `PERMISSION_DENIED`** – enable the Google Drive API for your OAuth project and list the signing-in account as a test user on the consent screen.
-- **`accessNotConfigured` or messages about the API not being used before** – enable the Drive API in Google Cloud console and retry after a short delay.
-- **`invalid_grant`** – the Drive token has expired or was revoked. Click **Connect Google Drive** again or revoke the existing grant from [Google Account permissions](https://myaccount.google.com/permissions) before reconnecting.
-- **`invalid` / `Invalid Value`** – VaultHub detected a stale Drive folder reference. Press **Refresh Drive** so the app can recreate its `VaultHub Workspace` structure automatically. If the error persists, delete the `VaultHub Workspace` folder from Drive and reconnect.
-- **Rate limit errors** – wait a minute before syncing again; Google's throttling should clear automatically.
-
-Share the error card details if you ask for help—they match exactly what Google sent back.
-
-### Why the preview can feel slow the first time
-
-VaultHub now loads Google's authentication libraries lazily, only after you sign in and land on the dashboard. A status banner explains whether the app is "Loading Google authentication libraries…" or "Syncing your Google Drive workspace…" so you know the UI is waiting on Google. The very first load can still take 5–10 seconds while those scripts initialise, but subsequent visits reuse the cached libraries and feel immediate.
+Because the anon key is public, every request stays client-side and there is no additional server to maintain. Restrict insert/update/delete access with Supabase Row Level Security if you intend to expose the vault broadly.
 
 ## Ready-to-use verification build
 
@@ -99,7 +112,7 @@ npm run build
 npm run preview
 ```
 
-Visit the printed URL (default `http://localhost:4173`) to exercise the full experience against Google Drive using the bundled credentials.
+Visit the printed URL (default `http://localhost:4173`) to exercise the full experience against your Supabase project using the bundled credentials.
 
 ## Build
 

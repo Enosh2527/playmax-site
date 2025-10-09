@@ -17,7 +17,7 @@ import {
   UploadCloud,
   MoreHorizontal,
   Layers,
-  HardDrive,
+  Cloud,
 } from "lucide-react";
 import { Button } from "./components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
@@ -25,7 +25,9 @@ import { Input } from "./components/ui/input";
 import { Textarea } from "./components/ui/textarea";
 import { Badge } from "./components/ui/badge";
 
-const initialAllowedEmails = ["admin@vaulthub.dev", "rajhanoch24@gmail.com"];
+const initialAllowedEmails = ["admin@vaulthub.dev", "rajhanoch24@gmail.com"].map((email) =>
+  email.toLowerCase()
+);
 const initialUsers = [
   {
     id: "admin",
@@ -43,7 +45,7 @@ const initialUsers = [
   },
 ];
 const protectedAdminEmails = new Set(
-  initialUsers.filter((user) => user.role === "admin").map((user) => user.email)
+  initialUsers.map((user) => user.email.toLowerCase())
 );
 
 const categories = [
@@ -52,71 +54,40 @@ const categories = [
   { id: "links", label: "Links", icon: Link2, accent: "from-[#bf3989] to-[#f778ba]" },
 ];
 
-const DEFAULT_GOOGLE_CLIENT_ID =
-  "952287910237-kqtdm3ls26n054t3eoelmi901filbmj0.apps.googleusercontent.com";
-const DEFAULT_GOOGLE_API_KEY = "AIzaSyALZ-76IMlrMHlRv0oNurLBfmM_mK_R9Ac";
-
-const resolveEnv = (value, fallback) =>
+const resolveEnv = (value, fallback = "") =>
   typeof value === "string" && value.trim().length > 0 ? value.trim() : fallback;
 
-const GOOGLE_API_KEY = resolveEnv(import.meta.env.VITE_GOOGLE_API_KEY, DEFAULT_GOOGLE_API_KEY);
-const GOOGLE_CLIENT_ID = resolveEnv(import.meta.env.VITE_GOOGLE_CLIENT_ID, DEFAULT_GOOGLE_CLIENT_ID);
-const DRIVE_SCOPES =
-  "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.metadata.readonly";
-const DRIVE_FOLDER_NAME = "VaultHub Workspace";
-const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
-const WORKSPACE_VERSION = "2";
+const SUPABASE_URL = resolveEnv(import.meta.env.VITE_SUPABASE_URL);
+const SUPABASE_ANON_KEY = resolveEnv(import.meta.env.VITE_SUPABASE_ANON_KEY);
+const SUPABASE_REST_URL = SUPABASE_URL ? `${SUPABASE_URL.replace(/\/$/, "")}/rest/v1` : "";
+
+async function supabaseRequest(path, { method = "GET", headers = {}, body, signal } = {}) {
+  if (!SUPABASE_REST_URL) {
+    throw new Error("Supabase credentials are not configured.");
+  }
+  const hasBody = body !== undefined;
+  const response = await fetch(`${SUPABASE_REST_URL}/${path}`, {
+    method,
+    signal,
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      ...(hasBody ? { "Content-Type": "application/json" } : {}),
+      ...headers,
+    },
+    body,
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `Supabase request failed (${response.status})`);
+  }
+  if (response.status === 204) {
+    return null;
+  }
+  return response.json();
+}
 
 const textEncoder = new TextEncoder();
-
-const DEFAULT_DRIVE_ERROR_MESSAGE = "Something went wrong while talking to Google Drive.";
-
-const STORAGE_MODES = {
-  DRIVE: "drive",
-  LOCAL: "local",
-};
-
-const STORAGE_MODE_KEY = "vaulthub-storage-mode";
-const LOCAL_WORKSPACE_KEY = "vaulthub-local-workspace-v1";
-
-function readLocalWorkspace() {
-  if (typeof window === "undefined") {
-    return { prompts: [], links: [], scripts: [] };
-  }
-
-  try {
-    const raw = window.localStorage.getItem(LOCAL_WORKSPACE_KEY);
-    if (!raw) {
-      return { prompts: [], links: [], scripts: [] };
-    }
-    const parsed = JSON.parse(raw);
-    return {
-      prompts: Array.isArray(parsed?.prompts) ? parsed.prompts : [],
-      links: Array.isArray(parsed?.links) ? parsed.links : [],
-      scripts: Array.isArray(parsed?.scripts) ? parsed.scripts : [],
-    };
-  } catch (error) {
-    console.warn("Failed to read local VaultHub workspace", error);
-    return { prompts: [], links: [], scripts: [] };
-  }
-}
-
-function writeLocalWorkspace(workspace) {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  try {
-    const payload = {
-      prompts: Array.isArray(workspace?.prompts) ? workspace.prompts : [],
-      links: Array.isArray(workspace?.links) ? workspace.links : [],
-      scripts: Array.isArray(workspace?.scripts) ? workspace.scripts : [],
-    };
-    window.localStorage.setItem(LOCAL_WORKSPACE_KEY, JSON.stringify(payload));
-  } catch (error) {
-    console.error("Failed to persist local VaultHub workspace", error);
-  }
-}
 
 function arrayBufferToBase64(buffer) {
   if (typeof window === "undefined" && typeof Buffer !== "undefined") {
@@ -157,88 +128,6 @@ function base64ToUint8Array(base64) {
     bytes[i] = binary.charCodeAt(i);
   }
   return bytes;
-}
-
-function normaliseDriveError(error) {
-  if (!error) {
-    return { message: DEFAULT_DRIVE_ERROR_MESSAGE };
-  }
-
-  if (typeof error === "string") {
-    return { message: error };
-  }
-
-  const gapiError = error?.result?.error;
-  const errorMessage =
-    error?.message ||
-    error?.error_description ||
-    gapiError?.message ||
-    DEFAULT_DRIVE_ERROR_MESSAGE;
-
-  const reason =
-    gapiError?.errors?.[0]?.reason ||
-    gapiError?.reason ||
-    error?.reason ||
-    (typeof error?.error === "string" ? error.error : undefined);
-  const status = gapiError?.status || error?.status;
-  const code = gapiError?.code || error?.code;
-
-  const combinedText = [
-    errorMessage,
-    error?.error_description,
-    gapiError?.message,
-    error?.details,
-  ]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
-
-  let hint = "";
-  if (
-    reason === "insufficientPermissions" ||
-    reason === "forbidden" ||
-    status === "PERMISSION_DENIED" ||
-    combinedText.includes("insufficient permission") ||
-    combinedText.includes("insufficient permissions")
-  ) {
-    hint =
-      "Enable the Google Drive API for this OAuth client and add the signed-in account as a test user on the consent screen.";
-  } else if (
-    reason === "accessNotConfigured" ||
-    combinedText.includes("has not been used in project")
-  ) {
-    hint = "Turn on the Google Drive API for this project in Google Cloud console, then try again.";
-  } else if (reason === "invalid" || combinedText.includes("invalid value")) {
-    hint =
-      "Google rejected one of the Drive folders the workspace references. Click “Refresh Drive” to let VaultHub rebuild its Drive structure, or delete the existing “VaultHub Workspace” folder in Drive before reconnecting.";
-  } else if (combinedText.includes("invalid grant")) {
-    hint =
-      "The Drive token expired or was revoked. Click \"Connect Google Drive\" again or remove VaultHub from https://myaccount.google.com/permissions before retrying.";
-  } else if (
-    reason === "dailyLimitExceeded" ||
-    reason === "userRateLimitExceeded" ||
-    reason === "rateLimitExceeded"
-  ) {
-    hint = "Google is currently throttling Drive requests. Wait a moment and retry the sync.";
-  }
-
-  const detailCandidates = [
-    error?.error_description,
-    gapiError?.message,
-    error?.details,
-  ];
-  const detail = detailCandidates.find(
-    (value) => Boolean(value) && value !== errorMessage
-  );
-
-  return {
-    message: errorMessage,
-    detail: detail || "",
-    hint,
-    code,
-    status,
-    reason,
-  };
 }
 
 const CRC_TABLE = new Uint32Array(256);
@@ -378,7 +267,9 @@ function ScriptBreadcrumb({ breadcrumbs, onNavigate }) {
           {index > 0 && <ChevronRight className="h-3.5 w-3.5 text-slate-500" />}
           <button
             onClick={() => onNavigate(crumb.id)}
-            className={`rounded-md px-2 py-1 transition ${crumb.active ? "bg-[#238636]/20 text-[#3fb950]" : "hover:bg-white/5"}`}
+            className={`rounded-md px-2 py-1 transition ${
+              crumb.active ? "bg-[#238636]/20 text-[#3fb950]" : "hover:bg-white/5"
+            }`}
           >
             {crumb.label}
           </button>
@@ -402,44 +293,119 @@ function EmptyState({ icon: Icon, title, description }) {
   );
 }
 
+const ALLOWED_EMAILS_KEY = "vaulthub-allowed-emails";
+const USERS_KEY = "vaulthub-users";
+
+const mapPromptRow = (row) => ({
+  id: row.id,
+  name: row.name,
+  description: row.description ?? "",
+  notes: row.notes ?? "",
+  uploader: row.uploader ?? "Unknown",
+  uploaderEmail: row.uploader_email ?? "",
+  createdAt: row.created_at ?? new Date().toISOString(),
+});
+
+const mapLinkRow = (row) => ({
+  id: row.id,
+  name: row.name,
+  url: row.url,
+  notes: row.notes ?? "",
+  uploader: row.uploader ?? "Unknown",
+  uploaderEmail: row.uploader_email ?? "",
+  createdAt: row.created_at ?? new Date().toISOString(),
+});
+
+const mapScriptRow = (row) => ({
+  id: row.id,
+  type: row.type,
+  name: row.name,
+  notes: row.notes ?? "",
+  uploader: row.uploader ?? "Unknown",
+  uploaderEmail: row.uploader_email ?? "",
+  createdAt: row.created_at ?? new Date().toISOString(),
+  parentId: row.parent_id ?? null,
+  mimeType: row.file_mime ?? (row.type === "folder" ? "" : "application/octet-stream"),
+  size: Number(row.file_size ?? 0),
+  originalName: row.original_name ?? row.name,
+  content: row.file_content ?? null,
+});
+
+function ensureAdmins(list) {
+  const byEmail = new Map(list.map((user) => [user.email.toLowerCase(), user]));
+  for (const admin of initialUsers) {
+    const key = admin.email.toLowerCase();
+    if (!byEmail.has(key)) {
+      byEmail.set(key, admin);
+    }
+  }
+  return Array.from(byEmail.values());
+}
+
 export default function App() {
   const isDraftMode = import.meta.env.MODE === "draft";
-  const [allowedEmails, setAllowedEmails] = useState(initialAllowedEmails);
-  const [users, setUsers] = useState(initialUsers);
+  const supabaseReady = Boolean(SUPABASE_REST_URL);
+
+  const [allowedEmails, setAllowedEmails] = useState(() => {
+    if (typeof window === "undefined") {
+      return initialAllowedEmails;
+    }
+    try {
+      const raw = window.localStorage.getItem(ALLOWED_EMAILS_KEY);
+      if (!raw) {
+        return initialAllowedEmails;
+      }
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) {
+        return initialAllowedEmails;
+      }
+      const cleaned = parsed.map((email) => String(email).toLowerCase());
+      return Array.from(new Set([...cleaned, ...initialAllowedEmails]));
+    } catch (error) {
+      console.warn("Failed to read allowed emails", error);
+      return initialAllowedEmails;
+    }
+  });
+
+  const [users, setUsers] = useState(() => {
+    if (typeof window === "undefined") {
+      return initialUsers;
+    }
+    try {
+      const raw = window.localStorage.getItem(USERS_KEY);
+      if (!raw) {
+        return initialUsers;
+      }
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) {
+        return initialUsers;
+      }
+      const cleaned = parsed.map((user) => ({
+        ...user,
+        email: String(user.email).toLowerCase(),
+      }));
+      return ensureAdmins(cleaned);
+    } catch (error) {
+      console.warn("Failed to read stored users", error);
+      return initialUsers;
+    }
+  });
+
   const [currentUser, setCurrentUser] = useState(null);
   const [authView, setAuthView] = useState("login");
   const [authError, setAuthError] = useState("");
-
-  const [storageMode, setStorageMode] = useState(() => {
-    if (typeof window === "undefined") {
-      return STORAGE_MODES.LOCAL;
-    }
-    const stored = window.localStorage.getItem(STORAGE_MODE_KEY);
-    if (stored === STORAGE_MODES.DRIVE || stored === STORAGE_MODES.LOCAL) {
-      return stored;
-    }
-    return STORAGE_MODES.LOCAL;
-  });
-  const storageModeRef = useRef(storageMode);
-  const localWorkspaceRef = useRef({ prompts: [], links: [], scripts: [] });
-
-  const missingDriveCredentials = !GOOGLE_API_KEY || !GOOGLE_CLIENT_ID;
-  const [driveClientReady, setDriveClientReady] = useState(false);
-  const [driveConnected, setDriveConnected] = useState(false);
-  const [driveLoading, setDriveLoading] = useState(false);
-  const [driveError, setDriveError] = useState("");
-  const [driveErrorInfo, setDriveErrorInfo] = useState(null);
-  const [driveBootstrapMessage, setDriveBootstrapMessage] = useState("");
-  const [driveFolders, setDriveFolders] = useState(null);
-  const [driveProfile, setDriveProfile] = useState(null);
-  const [isProcessing, setIsProcessing] = useState(false);
-
-  const [activeTab, setActiveTab] = useState("prompts");
   const [activeView, setActiveView] = useState("dashboard");
 
   const [prompts, setPrompts] = useState([]);
   const [scripts, setScripts] = useState([]);
   const [links, setLinks] = useState([]);
+
+  const [vaultError, setVaultError] = useState(() =>
+    supabaseReady ? "" : "Supabase credentials are missing. Update your environment variables to enable cloud storage."
+  );
+  const [vaultStatus, setVaultStatus] = useState("");
+  const [workspaceLoading, setWorkspaceLoading] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
 
   const [currentScriptFolderId, setCurrentScriptFolderId] = useState(null);
   const [selectedItems, setSelectedItems] = useState([]);
@@ -452,675 +418,85 @@ export default function App() {
   const [scriptFolderFiles, setScriptFolderFiles] = useState([]);
 
   const folderInputRef = useRef(null);
-  const tokenClientRef = useRef(null);
-  const driveFoldersRef = useRef(null);
+  const contextMenuRef = useRef(null);
 
   useEffect(() => {
-    storageModeRef.current = storageMode;
-    if (typeof window !== "undefined") {
-      window.localStorage.setItem(STORAGE_MODE_KEY, storageMode);
-    }
-  }, [storageMode]);
-
-  useEffect(() => {
-    if (storageMode === STORAGE_MODES.LOCAL) {
-      const workspace = readLocalWorkspace();
-      localWorkspaceRef.current = workspace;
-      setPrompts(workspace.prompts || []);
-      setLinks(workspace.links || []);
-      setScripts(workspace.scripts || []);
-      setDriveError("");
-      setDriveErrorInfo(null);
-      setDriveBootstrapMessage("");
-      setDriveClientReady(false);
-      setDriveConnected(false);
-      setDriveFolders(null);
-      driveFoldersRef.current = null;
-      setDriveProfile(null);
-    }
-    if (storageMode === STORAGE_MODES.DRIVE) {
-      localWorkspaceRef.current = { prompts: [], links: [], scripts: [] };
-      setPrompts([]);
-      setLinks([]);
-      setScripts([]);
-      driveFoldersRef.current = null;
-    }
-    setSelectedItems([]);
-    setPreview(null);
-    setCurrentScriptFolderId(null);
-  }, [storageMode]);
-
-  useEffect(() => {
-    if (storageMode !== STORAGE_MODES.LOCAL) {
-      return;
-    }
-    const workspace = {
-      prompts,
-      links,
-      scripts,
-    };
-    localWorkspaceRef.current = workspace;
-    writeLocalWorkspace(workspace);
-  }, [storageMode, prompts, links, scripts]);
-
-  const loadScript = useCallback((src) => {
-    return new Promise((resolve, reject) => {
-      if (document.querySelector(`script[src="${src}"]`)) {
-        resolve();
-        return;
-      }
-      const script = document.createElement("script");
-      script.src = src;
-      script.async = true;
-      script.defer = true;
-      script.onload = () => resolve();
-      script.onerror = () => reject(new Error(`Failed to load ${src}`));
-      document.body.appendChild(script);
-    });
-  }, []);
-
-  const clearDriveError = useCallback(() => {
-    setDriveError("");
-    setDriveErrorInfo(null);
-  }, []);
-
-  const handleDriveError = useCallback((error) => {
-    console.error(error);
-    const info = normaliseDriveError(error);
-    setDriveError(info.message);
-    setDriveErrorInfo(info);
-  }, []);
-
-  const handleLocalError = useCallback((error, fallbackMessage) => {
-    console.error(error);
-    setDriveError(
-      error?.message ||
-        fallbackMessage ||
-        "Something went wrong while saving to your browser vault."
-    );
-    setDriveErrorInfo(null);
-  }, []);
-
-  useEffect(() => {
-    if (scriptMode === "file") {
-      setScriptFolderFiles([]);
-    } else {
-      setScriptFiles([]);
+    if (scriptMode !== "folder") return;
+    const node = folderInputRef.current;
+    if (node) {
+      node.setAttribute("webkitdirectory", "");
+      node.setAttribute("directory", "");
     }
   }, [scriptMode]);
 
   useEffect(() => {
-    if (storageMode !== STORAGE_MODES.DRIVE) {
+    if (typeof window === "undefined") {
       return;
     }
-    if (activeView !== "dashboard" || !currentUser) {
+    window.localStorage.setItem(ALLOWED_EMAILS_KEY, JSON.stringify(allowedEmails));
+  }, [allowedEmails]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
       return;
     }
-
-    let cancelled = false;
-    const initialise = async () => {
-      if (missingDriveCredentials) {
-        setDriveClientReady(false);
-        setDriveConnected(false);
-        setDriveFolders(null);
-        setDriveBootstrapMessage("");
-        handleDriveError(
-          "Add VITE_GOOGLE_API_KEY and VITE_GOOGLE_CLIENT_ID to connect Google Drive storage."
-        );
-        return;
-      }
-      try {
-        clearDriveError();
-        setDriveBootstrapMessage(
-          "Loading Google authentication libraries… The first load can take up to 10 seconds while Google initialises."
-        );
-        await loadScript("https://accounts.google.com/gsi/client");
-        if (cancelled) return;
-        setDriveBootstrapMessage("Loading Google Drive client…");
-        await loadScript("https://apis.google.com/js/api.js");
-        if (cancelled) return;
-        setDriveBootstrapMessage("Initialising Google Drive SDK…");
-        await new Promise((resolve) => {
-          window.gapi.load("client", resolve);
-        });
-        if (cancelled) return;
-        await window.gapi.client.init({
-          apiKey: GOOGLE_API_KEY,
-          discoveryDocs: ["https://www.googleapis.com/discovery/v1/apis/drive/v3/rest"],
-        });
-        if (cancelled) return;
-        await window.gapi.client.load("drive", "v3");
-        if (cancelled) return;
-        tokenClientRef.current = window.google.accounts.oauth2.initTokenClient({
-          client_id: GOOGLE_CLIENT_ID,
-          scope: DRIVE_SCOPES,
-          callback: () => {},
-        });
-        setDriveClientReady(true);
-        setDriveBootstrapMessage("");
-      } catch (error) {
-        if (!cancelled) {
-          setDriveBootstrapMessage("");
-          handleDriveError(error);
-        }
-      }
-    };
-
-    initialise();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    activeView,
-    clearDriveError,
-    currentUser,
-    handleDriveError,
-    loadScript,
-    missingDriveCredentials,
-    storageMode,
-  ]);
-
-  useEffect(() => {
-    if (folderInputRef.current) {
-      folderInputRef.current.setAttribute("webkitdirectory", "");
-      folderInputRef.current.setAttribute("directory", "");
-    }
-  }, []);
-
-  useEffect(() => {
-    const listener = () => setContextMenu(null);
-    window.addEventListener("click", listener);
-    window.addEventListener("contextmenu", listener);
-    return () => {
-      window.removeEventListener("click", listener);
-      window.removeEventListener("contextmenu", listener);
-    };
-  }, []);
-
-  const requestDriveAccess = useCallback(
-    (promptForConsent = false) => {
-      if (!driveClientReady || !tokenClientRef.current) {
-        return Promise.reject(new Error("Google Drive isn't ready yet."));
-      }
-      return new Promise((resolve, reject) => {
-        tokenClientRef.current.callback = (response) => {
-          if (response.error) {
-            reject(new Error(response.error_description || "Google Drive authorization was denied."));
-            return;
-          }
-          const accessToken = response.access_token;
-          window.gapi.client.setToken({ access_token: accessToken });
-          setDriveConnected(true);
-          resolve(accessToken);
-        };
-        tokenClientRef.current.error_callback = (error) => {
-          const code = error?.error || "authorization_error";
-          const description = error?.error_description || "Google Drive authorization failed.";
-          if (code === "redirect_uri_mismatch") {
-            const origin = window.location?.origin ?? "your site";
-            reject(
-              new Error(
-                `Google rejected the Drive request because the OAuth client hasn't been told about ${origin}.\n\n` +
-                  `Open the Google Cloud console for the client ID ${GOOGLE_CLIENT_ID}, edit the OAuth 2.0 Web credentials, and add ${origin} to **Authorized JavaScript origins**. ` +
-                  "If you're testing from a deploy preview, add that preview URL as well. Save the change, wait a few seconds, then try again."
-              )
-            );
-            return;
-          }
-          reject(new Error(description));
-        };
-        try {
-          tokenClientRef.current.requestAccessToken({ prompt: promptForConsent ? "consent" : "" });
-        } catch (error) {
-          reject(error);
-        }
-      });
-    },
-    [driveClientReady]
-  );
-
-  const ensureDriveToken = useCallback(async () => {
-    const token = window.gapi?.client?.getToken?.();
-    if (token?.access_token) {
-      return token.access_token;
-    }
-    return requestDriveAccess(false);
-  }, [requestDriveAccess]);
-
-  const driveApiFetch = useCallback(
-    async (url, options = {}) => {
-      const accessToken = await ensureDriveToken();
-      const headers = {
-        Authorization: `Bearer ${accessToken}`,
-        ...(options.headers || {}),
-      };
-      const response = await fetch(url, { ...options, headers });
-      if (!response.ok) {
-        const detail = await response.text();
-        throw new Error(detail || `Google Drive request failed (${response.status})`);
-      }
-      return response;
-    },
-    [ensureDriveToken]
-  );
-
-  const findFolderByProperty = useCallback(
-    async (key, value) => {
-      await ensureDriveToken();
-      const query = [
-        "trashed=false",
-        `mimeType='${FOLDER_MIME_TYPE}'`,
-        `appProperties has { key='${key}', value='${value}' }`,
-      ].join(" and ");
-      const response = await window.gapi.client.drive.files.list({
-        q: query,
-        fields: "files(id,name,appProperties,parents)",
-        pageSize: 10,
-        orderBy: "createdTime desc",
-      });
-      const files = response.result.files || [];
-      for (const file of files) {
-        try {
-          await window.gapi.client.drive.files.get({ fileId: file.id, fields: "id" });
-          return file;
-        } catch (error) {
-          const info = normaliseDriveError(error);
-          const message = (info.message || "").toLowerCase();
-          if (
-            info.reason === "invalid" ||
-            info.code === 400 ||
-            info.status === "INVALID_ARGUMENT" ||
-            info.code === 404 ||
-            message.includes("invalid value")
-          ) {
-            continue;
-          }
-          throw error;
-        }
-      }
-      return null;
-    },
-    [ensureDriveToken]
-  );
-
-  const createDriveFolder = useCallback(
-    async (name, parentId, appProperties = {}) => {
-      await ensureDriveToken();
-      const response = await window.gapi.client.drive.files.create({
-        resource: {
-          name,
-          mimeType: FOLDER_MIME_TYPE,
-          parents: parentId ? [parentId] : undefined,
-          appProperties: { vaultHub: "true", ...appProperties },
-        },
-        fields: "id,name,appProperties,parents,createdTime,description",
-      });
-      return response.result;
-    },
-    [ensureDriveToken]
-  );
-
-  const ensureWorkspaceStructure = useCallback(async () => {
-    const buildWorkspace = async (forceNewRoot = false) => {
-      let root = null;
-      if (!forceNewRoot) {
-        root =
-          (await findFolderByProperty("vaultHubWorkspaceVersion", WORKSPACE_VERSION)) ||
-          (await findFolderByProperty("vaultHubRoot", "true"));
-      }
-      if (root && root.appProperties?.vaultHubWorkspaceVersion !== WORKSPACE_VERSION) {
-        try {
-          await window.gapi.client.drive.files.update({
-            fileId: root.id,
-            resource: {
-              appProperties: {
-                ...(root.appProperties || {}),
-                vaultHub: "true",
-                vaultHubRoot: "true",
-                vaultHubWorkspaceVersion: WORKSPACE_VERSION,
-              },
-            },
-            fields: "id,appProperties",
-          });
-          root.appProperties = {
-            ...(root.appProperties || {}),
-            vaultHub: "true",
-            vaultHubRoot: "true",
-            vaultHubWorkspaceVersion: WORKSPACE_VERSION,
-          };
-        } catch (error) {
-          const info = normaliseDriveError(error);
-          const message = (info.message || "").toLowerCase();
-          if (
-            info.reason === "invalid" ||
-            info.code === 400 ||
-            info.status === "INVALID_ARGUMENT" ||
-            info.code === 404 ||
-            message.includes("invalid value")
-          ) {
-            root = null;
-          } else {
-            throw error;
-          }
-        }
-      }
-      if (!root) {
-        root = await createDriveFolder(DRIVE_FOLDER_NAME, null, {
-          vaultHub: "true",
-          vaultHubRoot: "true",
-          vaultHubWorkspaceVersion: WORKSPACE_VERSION,
-        });
-      }
-
-      const ensureCategoryFolder = async (category, defaultName) => {
-        const query = [
-          "trashed=false",
-          `mimeType='${FOLDER_MIME_TYPE}'`,
-          `appProperties has { key='vaultHubCategory', value='${category}' }`,
-          `'${root.id}' in parents`,
-        ].join(" and ");
-        const response = await window.gapi.client.drive.files.list({
-          q: query,
-          fields: "files(id,name,appProperties,parents)",
-          pageSize: 1,
-        });
-        let folder = response.result.files?.[0];
-        if (!folder) {
-          folder = await createDriveFolder(defaultName, root.id, {
-            vaultHub: "true",
-            vaultHubCategory: category,
-            vaultHubWorkspaceVersion: WORKSPACE_VERSION,
-          });
-        } else if (folder.appProperties?.vaultHubWorkspaceVersion !== WORKSPACE_VERSION) {
-          try {
-            await window.gapi.client.drive.files.update({
-              fileId: folder.id,
-              resource: {
-                appProperties: {
-                  ...(folder.appProperties || {}),
-                  vaultHub: "true",
-                  vaultHubCategory: category,
-                  vaultHubWorkspaceVersion: WORKSPACE_VERSION,
-                },
-              },
-              fields: "id,appProperties",
-            });
-            folder.appProperties = {
-              ...(folder.appProperties || {}),
-              vaultHub: "true",
-              vaultHubCategory: category,
-              vaultHubWorkspaceVersion: WORKSPACE_VERSION,
-            };
-          } catch (error) {
-            const info = normaliseDriveError(error);
-            const message = (info.message || "").toLowerCase();
-            if (
-              info.reason === "invalid" ||
-              info.code === 400 ||
-              info.status === "INVALID_ARGUMENT" ||
-              info.code === 404 ||
-              message.includes("invalid value")
-            ) {
-              folder = await createDriveFolder(defaultName, root.id, {
-                vaultHub: "true",
-                vaultHubCategory: category,
-                vaultHubWorkspaceVersion: WORKSPACE_VERSION,
-              });
-            } else {
-              throw error;
-            }
-          }
-        }
-        return folder;
-      };
-
-      const promptsFolder = await ensureCategoryFolder("prompts", "Prompts");
-      const scriptsFolder = await ensureCategoryFolder("scripts", "Scripts");
-      const linksFolder = await ensureCategoryFolder("links", "Links");
-
-      const folders = {
-        rootId: root.id,
-        promptsId: promptsFolder.id,
-        scriptsId: scriptsFolder.id,
-        linksId: linksFolder.id,
-      };
-
-      driveFoldersRef.current = folders;
-      setDriveFolders(folders);
-      return folders;
-    };
-
-    try {
-      return await buildWorkspace(false);
-    } catch (error) {
-      const info = normaliseDriveError(error);
-      const message = (info.message || "").toLowerCase();
-      if (
-        info.reason === "invalid" ||
-        info.code === 400 ||
-        info.status === "INVALID_ARGUMENT" ||
-        message.includes("invalid value")
-      ) {
-        return await buildWorkspace(true);
-      }
-      throw error;
-    }
-  }, [createDriveFolder, findFolderByProperty]);
-
-  const listFolderContents = useCallback(
-    async (folderId) => {
-      await ensureDriveToken();
-      const items = [];
-      let pageToken = undefined;
-      do {
-        const response = await window.gapi.client.drive.files.list({
-          q: `'${folderId}' in parents and trashed=false`,
-          fields:
-            "nextPageToken,files(id,name,mimeType,description,appProperties,createdTime,modifiedTime,size,parents,owners(displayName,emailAddress))",
-          pageSize: 1000,
-          pageToken,
-        });
-        const files = response.result.files || [];
-        items.push(...files);
-        pageToken = response.result.nextPageToken;
-      } while (pageToken);
-      return items;
-    },
-    [ensureDriveToken]
-  );
-
-  const fetchDriveProfile = useCallback(async () => {
-    await ensureDriveToken();
-    const response = await window.gapi.client.drive.about.get({
-      fields: "user(displayName,emailAddress)",
-    });
-    return response.result.user;
-  }, [ensureDriveToken]);
-
-  const loadPromptsFromDrive = useCallback(
-    async (folderId) => {
-      if (!folderId) return [];
-      const files = await listFolderContents(folderId);
-      const entries = [];
-      for (const file of files) {
-        try {
-          const response = await driveApiFetch(
-            `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`
-          );
-          const text = await response.text();
-          const data = JSON.parse(text);
-          entries.push({
-            id: file.id,
-            name: data.name || file.name.replace(/\.json$/i, ""),
-            description: data.description || "",
-            notes: data.notes || file.description || "",
-            uploader: data.uploader || file.appProperties?.uploaderName || file.owners?.[0]?.displayName || "Unknown",
-            uploaderEmail:
-              data.uploaderEmail || file.appProperties?.uploaderEmail || file.owners?.[0]?.emailAddress || "",
-            createdAt: data.createdAt || file.appProperties?.createdAt || file.createdTime,
-            fileId: file.id,
-          });
-        } catch (error) {
-          console.warn("Failed to read prompt", file.id, error);
-        }
-      }
-      entries.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
-      setPrompts(entries);
-      return entries;
-    },
-    [driveApiFetch, listFolderContents]
-  );
-
-  const loadLinksFromDrive = useCallback(
-    async (folderId) => {
-      if (!folderId) return [];
-      const files = await listFolderContents(folderId);
-      const entries = [];
-      for (const file of files) {
-        try {
-          const response = await driveApiFetch(
-            `https://www.googleapis.com/drive/v3/files/${file.id}?alt=media`
-          );
-          const text = await response.text();
-          const data = JSON.parse(text);
-          entries.push({
-            id: file.id,
-            name: data.name || file.name.replace(/\.json$/i, ""),
-            url: data.url || "",
-            notes: data.notes || file.description || "",
-            uploader: data.uploader || file.appProperties?.uploaderName || file.owners?.[0]?.displayName || "Unknown",
-            uploaderEmail:
-              data.uploaderEmail || file.appProperties?.uploaderEmail || file.owners?.[0]?.emailAddress || "",
-            createdAt: data.createdAt || file.appProperties?.createdAt || file.createdTime,
-            fileId: file.id,
-          });
-        } catch (error) {
-          console.warn("Failed to read link", file.id, error);
-        }
-      }
-      entries.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
-      setLinks(entries);
-      return entries;
-    },
-    [driveApiFetch, listFolderContents]
-  );
-
-  const loadScriptsFromDrive = useCallback(
-    async (folderId, logicalParentId = null, collection = []) => {
-      if (!folderId) return collection;
-      const files = await listFolderContents(folderId);
-      for (const file of files) {
-        const base = {
-          id: file.id,
-          name: file.name,
-          notes: file.description || "",
-          uploader: file.appProperties?.uploaderName || file.owners?.[0]?.displayName || "Unknown",
-          uploaderEmail: file.appProperties?.uploaderEmail || file.owners?.[0]?.emailAddress || "",
-          createdAt: file.appProperties?.createdAt || file.createdTime,
-          parentId: logicalParentId,
-        };
-        if (file.mimeType === FOLDER_MIME_TYPE) {
-          const folderItem = {
-            ...base,
-            type: "folder",
-          };
-          collection.push(folderItem);
-          await loadScriptsFromDrive(file.id, file.id, collection);
-        } else {
-          const fileItem = {
-            ...base,
-            type: "file",
-            mimeType: file.mimeType,
-            size: Number(file.size || 0),
-            originalName: file.appProperties?.originalName || file.name,
-          };
-          collection.push(fileItem);
-        }
-      }
-      return collection;
-    },
-    [listFolderContents]
-  );
+    window.localStorage.setItem(USERS_KEY, JSON.stringify(users));
+  }, [users]);
 
   const refreshWorkspace = useCallback(async () => {
-    if (storageMode !== STORAGE_MODES.DRIVE) {
+    if (!supabaseReady) {
       return;
     }
     try {
-      setDriveLoading(true);
-      setDriveBootstrapMessage("Syncing your Google Drive workspace…");
-      const folders = driveFoldersRef.current || (await ensureWorkspaceStructure());
-      await Promise.all([
-        loadPromptsFromDrive(folders.promptsId),
-        loadLinksFromDrive(folders.linksId),
-        (async () => {
-          const entries = await loadScriptsFromDrive(folders.scriptsId, null, []);
-          setScripts(entries);
-        })(),
-      ]);
-      clearDriveError();
-      if (!driveProfile) {
-        const profile = await fetchDriveProfile();
-        setDriveProfile(profile);
-      }
-    } catch (error) {
-      handleDriveError(error);
-    } finally {
-      setDriveLoading(false);
-      setDriveBootstrapMessage("");
-    }
-  }, [
-    clearDriveError,
-    ensureWorkspaceStructure,
-    fetchDriveProfile,
-    handleDriveError,
-    loadLinksFromDrive,
-    loadPromptsFromDrive,
-    loadScriptsFromDrive,
-    driveProfile,
-    storageMode,
-  ]);
+      setWorkspaceLoading(true);
+      setVaultStatus("Syncing workspace from Supabase…");
+      setVaultError("");
 
-  const handleDriveConnect = useCallback(async () => {
-    if (storageMode !== STORAGE_MODES.DRIVE) {
-      return;
-    }
-    try {
-      clearDriveError();
-      setDriveLoading(true);
-      setDriveBootstrapMessage("Authorising with Google Drive…");
-      await requestDriveAccess(true);
-      await refreshWorkspace();
+      const [promptsData, linksData, scriptsData] = await Promise.all([
+        supabaseRequest("prompts?select=*"),
+        supabaseRequest("links?select=*"),
+        supabaseRequest("scripts?select=*"),
+      ]);
+
+      const promptEntries = (promptsData ?? []).map(mapPromptRow);
+      const linkEntries = (linksData ?? []).map(mapLinkRow);
+      const scriptEntries = (scriptsData ?? []).map(mapScriptRow);
+
+      promptEntries.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+      linkEntries.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+
+      setPrompts(promptEntries);
+      setLinks(linkEntries);
+      setScripts(scriptEntries);
     } catch (error) {
-      handleDriveError(error);
+      console.error("Failed to sync Supabase", error);
+      setVaultError(error.message || "Unable to sync the Supabase workspace.");
     } finally {
-      setDriveLoading(false);
-      setDriveBootstrapMessage("");
+      setWorkspaceLoading(false);
+      setVaultStatus("");
     }
-  }, [
-    clearDriveError,
-    handleDriveError,
-    refreshWorkspace,
-    requestDriveAccess,
-    storageMode,
-  ]);
+  }, [supabaseReady]);
 
   useEffect(() => {
-    if (storageMode !== STORAGE_MODES.DRIVE) return;
-    if (!driveClientReady || missingDriveCredentials) return;
-    const token = window.gapi?.client?.getToken?.();
-    if (token?.access_token && !driveConnected) {
-      setDriveConnected(true);
-      refreshWorkspace();
+    if (!supabaseReady) {
+      return;
     }
-  }, [
-    driveClientReady,
-    driveConnected,
-    missingDriveCredentials,
-    refreshWorkspace,
-    storageMode,
-  ]);
+    refreshWorkspace();
+  }, [supabaseReady, refreshWorkspace]);
+
+  useEffect(() => {
+    const handleClick = (event) => {
+      if (contextMenuRef.current && !contextMenuRef.current.contains(event.target)) {
+        setContextMenu(null);
+      }
+    };
+    if (contextMenu) {
+      window.addEventListener("click", handleClick);
+    }
+    return () => {
+      window.removeEventListener("click", handleClick);
+    };
+  }, [contextMenu]);
 
   const scriptsById = useMemo(() => {
     const map = new Map();
@@ -1153,11 +529,8 @@ export default function App() {
     [prompts, links, scripts]
   );
 
-  const driveReadyForActions = driveConnected && Boolean(driveFolders);
-  const usingDrive = storageMode === STORAGE_MODES.DRIVE;
-  const usingLocal = !usingDrive;
-  const storageReadyForActions = usingDrive ? driveReadyForActions : true;
-  const isBusy = isProcessing || (usingDrive ? driveLoading : false);
+  const isBusy = isProcessing || workspaceLoading;
+  const adminOnly = currentUser?.role === "admin";
 
   const handleAuth = (event) => {
     event.preventDefault();
@@ -1167,7 +540,7 @@ export default function App() {
     const name = String(form.get("name") || "").trim();
 
     if (authView === "login") {
-      const user = users.find((u) => u.email === email && u.password === password);
+      const user = users.find((u) => u.email.toLowerCase() === email && u.password === password);
       if (!user) {
         setAuthError("Invalid email or password. Try again.");
         return;
@@ -1186,7 +559,7 @@ export default function App() {
       setAuthError("Please provide your name so teammates know who uploaded files.");
       return;
     }
-    if (users.some((u) => u.email === email)) {
+    if (users.some((u) => u.email.toLowerCase() === email)) {
       setAuthError("An account already exists for this email. Please log in instead.");
       return;
     }
@@ -1205,71 +578,37 @@ export default function App() {
 
   const handleAddPrompt = async (event) => {
     event.preventDefault();
-    if (!currentUser) return;
+    if (!currentUser || !supabaseReady) return;
     const form = new FormData(event.currentTarget);
     const name = String(form.get("name") || "").trim();
     const description = String(form.get("description") || "").trim();
     const notes = String(form.get("notes") || "").trim();
     if (!name) return;
     const createdAt = new Date().toISOString();
-    const payload = {
-      name,
-      description,
-      notes,
-      uploader: currentUser.name,
-      uploaderEmail: currentUser.email,
-      createdAt,
-    };
-
-    if (storageMode === STORAGE_MODES.LOCAL) {
-      try {
-        setIsProcessing(true);
-        clearDriveError();
-        const entry = { ...payload, id: crypto.randomUUID() };
-        setPrompts((prev) =>
-          [...prev, entry].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
-        );
-        event.currentTarget.reset();
-      } catch (error) {
-        handleLocalError(error, "Failed to store the prompt locally. Try again.");
-      } finally {
-        setIsProcessing(false);
-      }
-      return;
-    }
-
-    if (!driveFolders?.promptsId) {
-      handleDriveError("Connect Google Drive before saving prompts.");
-      return;
-    }
     try {
       setIsProcessing(true);
-      await ensureDriveToken();
-      const response = await window.gapi.client.drive.files.create({
-        resource: {
-          name: safeFileName(name, "json"),
-          parents: [driveFolders.promptsId],
-          description: notes,
-          appProperties: {
-            vaultHub: "true",
-            uploaderName: currentUser.name,
-            uploaderEmail: currentUser.email,
-            createdAt,
-          },
-        },
-        media: {
-          mimeType: "application/json",
-          body: new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }),
-        },
-        fields: "id",
+      const payload = {
+        id: crypto.randomUUID(),
+        name,
+        description,
+        notes,
+        uploader: currentUser.name,
+        uploader_email: currentUser.email,
+        created_at: createdAt,
+      };
+      const data = await supabaseRequest("prompts", {
+        method: "POST",
+        headers: { Prefer: "return=representation" },
+        body: JSON.stringify([payload]),
       });
-      const entry = { ...payload, id: response.result.id, fileId: response.result.id };
+      const entry = mapPromptRow((data ?? [payload])[0]);
       setPrompts((prev) =>
         [...prev, entry].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
       );
       event.currentTarget.reset();
     } catch (error) {
-      handleDriveError(error);
+      console.error("Failed to add prompt", error);
+      setVaultError(error.message || "Unable to save the prompt to Supabase.");
     } finally {
       setIsProcessing(false);
     }
@@ -1277,344 +616,177 @@ export default function App() {
 
   const handleAddLink = async (event) => {
     event.preventDefault();
-    if (!currentUser) return;
+    if (!currentUser || !supabaseReady) return;
     const form = new FormData(event.currentTarget);
     const name = String(form.get("name") || "").trim();
     const url = String(form.get("url") || "").trim();
     const notes = String(form.get("notes") || "").trim();
     if (!name || !url) return;
     const createdAt = new Date().toISOString();
-    const payload = {
-      name,
-      url,
-      notes,
-      uploader: currentUser.name,
-      uploaderEmail: currentUser.email,
-      createdAt,
-    };
-
-    if (storageMode === STORAGE_MODES.LOCAL) {
-      try {
-        setIsProcessing(true);
-        clearDriveError();
-        const entry = { ...payload, id: crypto.randomUUID() };
-        setLinks((prev) =>
-          [...prev, entry].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
-        );
-        event.currentTarget.reset();
-      } catch (error) {
-        handleLocalError(error, "Failed to store the link locally. Try again.");
-      } finally {
-        setIsProcessing(false);
-      }
-      return;
-    }
-
-    if (!driveFolders?.linksId) {
-      handleDriveError("Connect Google Drive before saving links.");
-      return;
-    }
     try {
       setIsProcessing(true);
-      await ensureDriveToken();
-      const response = await window.gapi.client.drive.files.create({
-        resource: {
-          name: safeFileName(name, "json"),
-          parents: [driveFolders.linksId],
-          description: notes,
-          appProperties: {
-            vaultHub: "true",
-            uploaderName: currentUser.name,
-            uploaderEmail: currentUser.email,
-            createdAt,
-          },
-        },
-        media: {
-          mimeType: "application/json",
-          body: new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }),
-        },
-        fields: "id",
+      const payload = {
+        id: crypto.randomUUID(),
+        name,
+        url,
+        notes,
+        uploader: currentUser.name,
+        uploader_email: currentUser.email,
+        created_at: createdAt,
+      };
+      const data = await supabaseRequest("links", {
+        method: "POST",
+        headers: { Prefer: "return=representation" },
+        body: JSON.stringify([payload]),
       });
-      const entry = { ...payload, id: response.result.id, fileId: response.result.id };
+      const entry = mapLinkRow((data ?? [payload])[0]);
       setLinks((prev) =>
         [...prev, entry].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
       );
       event.currentTarget.reset();
     } catch (error) {
-      handleDriveError(error);
+      console.error("Failed to add link", error);
+      setVaultError(error.message || "Unable to save the link to Supabase.");
     } finally {
       setIsProcessing(false);
     }
   };
 
+  const gatherFolderRows = async ({ files, name, notes, createdAt, parentLogicalId }) => {
+    const rows = [];
+    const rootId = crypto.randomUUID();
+    const defaultRootName = files[0]?.webkitRelativePath?.split("/")[0] || "Folder";
+    const rootRow = {
+      id: rootId,
+      type: "folder",
+      name: name || defaultRootName,
+      notes,
+      uploader: currentUser.name,
+      uploader_email: currentUser.email,
+      created_at: createdAt,
+      parent_id: parentLogicalId,
+    };
+    rows.push(rootRow);
+    const pathToFolderId = new Map();
+    pathToFolderId.set("", rootId);
+
+    for (const file of files) {
+      const rawPath = file.webkitRelativePath || file.name;
+      const parts = rawPath.split("/");
+      if (parts.length > 1) {
+        parts.shift();
+      }
+      const fileName = parts.pop() || file.name;
+      let currentPath = "";
+      for (const segment of parts) {
+        currentPath = currentPath ? `${currentPath}/${segment}` : segment;
+        if (!pathToFolderId.has(currentPath)) {
+          const folderId = crypto.randomUUID();
+          const parentPath = currentPath.split("/").slice(0, -1).join("/");
+          const folderParentId = parentPath ? pathToFolderId.get(parentPath) : rootId;
+          rows.push({
+            id: folderId,
+            type: "folder",
+            name: segment,
+            notes,
+            uploader: currentUser.name,
+            uploader_email: currentUser.email,
+            created_at: createdAt,
+            parent_id: folderParentId,
+          });
+          pathToFolderId.set(currentPath, folderId);
+        }
+      }
+      const parentPathKey = parts.join("/");
+      const folderId = parentPathKey ? pathToFolderId.get(parentPathKey) : rootId;
+      const buffer = await file.arrayBuffer();
+      rows.push({
+        id: crypto.randomUUID(),
+        type: "file",
+        name: fileName,
+        original_name: file.name,
+        file_mime: file.type || "application/octet-stream",
+        file_size: Number(file.size || 0),
+        notes,
+        uploader: currentUser.name,
+        uploader_email: currentUser.email,
+        created_at: createdAt,
+        parent_id: folderId,
+        file_content: arrayBufferToBase64(buffer),
+      });
+    }
+
+    return rows;
+  };
+
   const handleAddScript = async (event) => {
     event.preventDefault();
-    if (!currentUser) return;
-    const formData = new FormData(event.currentTarget);
-    const name = String(formData.get("name") || "").trim();
-    const notes = String(formData.get("notes") || "").trim();
+    if (!currentUser || !supabaseReady) return;
+    const form = new FormData(event.currentTarget);
+    const name = String(form.get("name") || "").trim();
+    const notes = String(form.get("notes") || "").trim();
     const createdAt = new Date().toISOString();
-    const parentDriveId = currentScriptFolderId ?? driveFolders?.scriptsId;
     const parentLogicalId = currentScriptFolderId ?? null;
-
-    if (storageMode === STORAGE_MODES.LOCAL) {
-      try {
-        setIsProcessing(true);
-        clearDriveError();
-        if (scriptMode === "file") {
-          if (!scriptFiles.length) return;
-          const file = scriptFiles[0];
-          const buffer = await file.arrayBuffer();
-          const entry = {
-            id: crypto.randomUUID(),
-            type: "file",
-            name: name || file.name,
-            originalName: file.name,
-            mimeType: file.type || "application/octet-stream",
-            size: Number(file.size || 0),
-            notes,
-            uploader: currentUser.name,
-            uploaderEmail: currentUser.email,
-            createdAt,
-            parentId: parentLogicalId,
-            content: arrayBufferToBase64(buffer),
-          };
-          setScripts((prev) => [...prev, entry]);
-          setScriptFiles([]);
-          event.currentTarget.reset();
-          return;
-        }
-
-        if (!scriptFolderFiles.length) return;
-        const files = Array.from(scriptFolderFiles);
-        const defaultRootName = files[0]?.webkitRelativePath?.split("/")[0] || "Folder";
-        const rootId = crypto.randomUUID();
-        const rootEntry = {
-          id: rootId,
-          type: "folder",
-          name: name || defaultRootName,
-          notes,
-          uploader: currentUser.name,
-          uploaderEmail: currentUser.email,
-          createdAt,
-          parentId: parentLogicalId,
-        };
-        const createdItems = [rootEntry];
-        const pathToFolderId = new Map();
-        pathToFolderId.set("", rootId);
-
-        for (const file of files) {
-          const rawPath = file.webkitRelativePath || file.name;
-          const parts = rawPath.split("/");
-          if (parts.length > 1) {
-            parts.shift();
-          }
-          const fileName = parts.pop() || file.name;
-          let currentPath = "";
-          for (const segment of parts) {
-            currentPath = currentPath ? `${currentPath}/${segment}` : segment;
-            if (!pathToFolderId.has(currentPath)) {
-              const folderId = crypto.randomUUID();
-              const parentPath = currentPath.split("/").slice(0, -1).join("/");
-              const folderParentId = parentPath ? pathToFolderId.get(parentPath) : rootId;
-              const folderEntry = {
-                id: folderId,
-                type: "folder",
-                name: segment,
-                notes,
-                uploader: currentUser.name,
-                uploaderEmail: currentUser.email,
-                createdAt,
-                parentId: folderParentId,
-              };
-              pathToFolderId.set(currentPath, folderId);
-              createdItems.push(folderEntry);
-            }
-          }
-          const parentPathKey = parts.join("/");
-          const folderId = parentPathKey ? pathToFolderId.get(parentPathKey) : rootId;
-          const buffer = await file.arrayBuffer();
-          const fileEntry = {
-            id: crypto.randomUUID(),
-            type: "file",
-            name: fileName,
-            originalName: file.name,
-            mimeType: file.type || "application/octet-stream",
-            size: Number(file.size || 0),
-            notes,
-            uploader: currentUser.name,
-            uploaderEmail: currentUser.email,
-            createdAt,
-            parentId: folderId,
-            content: arrayBufferToBase64(buffer),
-          };
-          createdItems.push(fileEntry);
-        }
-        setScripts((prev) => [...prev, ...createdItems]);
-        setScriptFolderFiles([]);
-        event.currentTarget.reset();
-      } catch (error) {
-        handleLocalError(error, "Failed to store the scripts locally. Try again.");
-      } finally {
-        setIsProcessing(false);
-      }
-      return;
-    }
-
-    if (!driveFolders?.scriptsId) {
-      handleDriveError("Connect Google Drive before uploading scripts.");
-      return;
-    }
 
     try {
       setIsProcessing(true);
-      await ensureDriveToken();
+      setVaultError("");
 
       if (scriptMode === "file") {
         if (!scriptFiles.length) return;
         const file = scriptFiles[0];
-        const response = await window.gapi.client.drive.files.create({
-          resource: {
-            name: name || file.name,
-            parents: [parentDriveId],
-            description: notes,
-            appProperties: {
-              vaultHub: "true",
-              vaultHubType: "script-file",
-              uploaderName: currentUser.name,
-              uploaderEmail: currentUser.email,
-              createdAt,
-              originalName: file.name,
-            },
-          },
-          media: {
-            mimeType: file.type || "application/octet-stream",
-            body: file,
-          },
-          fields: "id,name,mimeType,size",
-        });
-        const newItem = {
-          id: response.result.id,
+        const buffer = await file.arrayBuffer();
+        const payload = {
+          id: crypto.randomUUID(),
           type: "file",
           name: name || file.name,
-          originalName: file.name,
-          mimeType: response.result.mimeType || file.type || "application/octet-stream",
-          size: Number(response.result.size || file.size || 0),
+          original_name: file.name,
+          file_mime: file.type || "application/octet-stream",
+          file_size: Number(file.size || 0),
           notes,
           uploader: currentUser.name,
-          uploaderEmail: currentUser.email,
-          createdAt,
-          parentId: parentLogicalId,
+          uploader_email: currentUser.email,
+          created_at: createdAt,
+          parent_id: parentLogicalId,
+          file_content: arrayBufferToBase64(buffer),
         };
-        setScripts((prev) => [...prev, newItem]);
+        const data = await supabaseRequest("scripts", {
+          method: "POST",
+          headers: { Prefer: "return=representation" },
+          body: JSON.stringify([payload]),
+        });
+        const entry = mapScriptRow((data ?? [payload])[0]);
+        setScripts((prev) => [...prev, entry]);
         setScriptFiles([]);
         event.currentTarget.reset();
         return;
       }
 
       if (!scriptFolderFiles.length) return;
-      const files = Array.from(scriptFolderFiles);
-      const defaultRootName = files[0]?.webkitRelativePath?.split("/")[0] || "Folder";
-      const rootFolder = await createDriveFolder(name || defaultRootName, parentDriveId, {
-        vaultHubType: "script-folder",
-        uploaderName: currentUser.name,
-        uploaderEmail: currentUser.email,
+      const rows = await gatherFolderRows({
+        files: Array.from(scriptFolderFiles),
+        name,
+        notes,
         createdAt,
+        parentLogicalId,
       });
-      const createdItems = [
-        {
-          id: rootFolder.id,
-          type: "folder",
-          name: rootFolder.name,
-          notes,
-          uploader: currentUser.name,
-          uploaderEmail: currentUser.email,
-          createdAt,
-          parentId: parentLogicalId,
-        },
-      ];
-
-      const pathToFolderId = new Map();
-      pathToFolderId.set("", rootFolder.id);
-
-      for (const file of files) {
-        const rawPath = file.webkitRelativePath || file.name;
-        const parts = rawPath.split("/");
-        if (parts.length > 1) {
-          parts.shift();
-        }
-        const fileName = parts.pop() || file.name;
-        let currentPath = "";
-        for (const segment of parts) {
-          currentPath = currentPath ? `${currentPath}/${segment}` : segment;
-          if (!pathToFolderId.has(currentPath)) {
-            const parentPath = currentPath.split("/").slice(0, -1).join("/");
-            const parentId = parentPath ? pathToFolderId.get(parentPath) : rootFolder.id;
-            const folder = await createDriveFolder(segment, parentId, {
-              vaultHubType: "script-folder",
-              uploaderName: currentUser.name,
-              uploaderEmail: currentUser.email,
-              createdAt,
-            });
-            pathToFolderId.set(currentPath, folder.id);
-            createdItems.push({
-              id: folder.id,
-              type: "folder",
-              name: segment,
-              notes,
-              uploader: currentUser.name,
-              uploaderEmail: currentUser.email,
-              createdAt,
-              parentId: parentPath ? pathToFolderId.get(parentPath) : rootFolder.id,
-            });
-          }
-        }
-        const parentPathKey = parts.join("/");
-        const parentForFile = parentPathKey ? pathToFolderId.get(parentPathKey) : rootFolder.id;
-        const fileResponse = await window.gapi.client.drive.files.create({
-          resource: {
-            name: fileName,
-            parents: [parentForFile],
-            description: notes,
-            appProperties: {
-              vaultHub: "true",
-              vaultHubType: "script-file",
-              uploaderName: currentUser.name,
-              uploaderEmail: currentUser.email,
-              createdAt,
-              originalName: file.name,
-            },
-          },
-          media: {
-            mimeType: file.type || "application/octet-stream",
-            body: file,
-          },
-          fields: "id,name,mimeType,size",
-        });
-        createdItems.push({
-          id: fileResponse.result.id,
-          type: "file",
-          name: fileName,
-          originalName: file.name,
-          mimeType: fileResponse.result.mimeType || file.type || "application/octet-stream",
-          size: Number(fileResponse.result.size || file.size || 0),
-          notes,
-          uploader: currentUser.name,
-          uploaderEmail: currentUser.email,
-          createdAt,
-          parentId: parentForFile,
-        });
-      }
-
-      setScripts((prev) => [...prev, ...createdItems]);
+      const data = await supabaseRequest("scripts", {
+        method: "POST",
+        headers: { Prefer: "return=representation" },
+        body: JSON.stringify(rows),
+      });
+      const inserted = (data ?? rows).map(mapScriptRow);
+      setScripts((prev) => [...prev, ...inserted]);
       setScriptFolderFiles([]);
       event.currentTarget.reset();
     } catch (error) {
-      handleDriveError(error);
+      console.error("Failed to store scripts", error);
+      setVaultError(error.message || "Unable to save the scripts to Supabase.");
     } finally {
       setIsProcessing(false);
     }
   };
+
   const toggleSelection = (category, id) => {
     setSelectedItems((prev) => {
       const exists = prev.some((item) => item.category === category && item.id === id);
@@ -1625,59 +797,40 @@ export default function App() {
     });
   };
 
-  const removeScriptItem = useCallback(
-    (id) => {
-      const ids = new Set([id]);
-      const queue = [id];
-      while (queue.length) {
-        const current = queue.shift();
-        scripts.forEach((item) => {
-          if (item.parentId === current && !ids.has(item.id)) {
-            ids.add(item.id);
-            queue.push(item.id);
-          }
-        });
-      }
-      setScripts((prev) => prev.filter((item) => !ids.has(item.id)));
-      setSelectedItems((prev) => prev.filter((item) => !(item.category === "scripts" && ids.has(item.id))));
-      setPreview((prevPreview) => {
-        if (prevPreview && prevPreview.category === "scripts" && ids.has(prevPreview.item.id)) {
-          return null;
+  const collectScriptBranchIds = (rootId) => {
+    const ids = new Set([rootId]);
+    const queue = [rootId];
+    while (queue.length) {
+      const current = queue.shift();
+      scripts.forEach((item) => {
+        if (item.parentId === current && !ids.has(item.id)) {
+          ids.add(item.id);
+          queue.push(item.id);
         }
-        return prevPreview;
       });
-      setCurrentScriptFolderId((currentId) => (currentId && ids.has(currentId) ? null : currentId));
-    },
-    [scripts]
-  );
+    }
+    return ids;
+  };
+
+  const pruneScriptItems = (ids) => {
+    setScripts((prev) => prev.filter((item) => !ids.has(item.id)));
+    setSelectedItems((prev) => prev.filter((item) => !(item.category === "scripts" && ids.has(item.id))));
+    setPreview((prevPreview) => {
+      if (prevPreview && prevPreview.category === "scripts" && ids.has(prevPreview.item.id)) {
+        return null;
+      }
+      return prevPreview;
+    });
+    setCurrentScriptFolderId((currentId) => (currentId && ids.has(currentId) ? null : currentId));
+  };
 
   const handleDelete = async (category, id) => {
+    if (!supabaseReady) return;
     try {
       setIsProcessing(true);
-      if (storageMode === STORAGE_MODES.LOCAL) {
-        clearDriveError();
-        if (category === "prompts") {
-          setPrompts((prev) => prev.filter((item) => item.id !== id));
-          setSelectedItems((prev) => prev.filter((item) => !(item.category === category && item.id === id)));
-          setPreview((prevPreview) =>
-            prevPreview && prevPreview.category === category && prevPreview.item.id === id ? null : prevPreview
-          );
-          return;
-        }
-        if (category === "links") {
-          setLinks((prev) => prev.filter((item) => item.id !== id));
-          setSelectedItems((prev) => prev.filter((item) => !(item.category === category && item.id === id)));
-          setPreview((prevPreview) =>
-            prevPreview && prevPreview.category === category && prevPreview.item.id === id ? null : prevPreview
-          );
-          return;
-        }
-        removeScriptItem(id);
-        return;
-      }
-      await ensureDriveToken();
-      await window.gapi.client.drive.files.delete({ fileId: id });
+      setVaultError("");
       if (category === "prompts") {
+        await supabaseRequest(`prompts?id=eq.${encodeURIComponent(id)}`, { method: "DELETE" });
         setPrompts((prev) => prev.filter((item) => item.id !== id));
         setSelectedItems((prev) => prev.filter((item) => !(item.category === category && item.id === id)));
         setPreview((prevPreview) =>
@@ -1686,6 +839,7 @@ export default function App() {
         return;
       }
       if (category === "links") {
+        await supabaseRequest(`links?id=eq.${encodeURIComponent(id)}`, { method: "DELETE" });
         setLinks((prev) => prev.filter((item) => item.id !== id));
         setSelectedItems((prev) => prev.filter((item) => !(item.category === category && item.id === id)));
         setPreview((prevPreview) =>
@@ -1693,13 +847,15 @@ export default function App() {
         );
         return;
       }
-      removeScriptItem(id);
+      const ids = collectScriptBranchIds(id);
+      const idList = Array.from(ids)
+        .map((value) => `"${value}"`)
+        .join(",");
+      await supabaseRequest(`scripts?id=in.(${idList})`, { method: "DELETE" });
+      pruneScriptItems(ids);
     } catch (error) {
-      if (storageMode === STORAGE_MODES.LOCAL) {
-        handleLocalError(error, "Failed to delete the item from your browser vault. Try again.");
-      } else {
-        handleDriveError(error);
-      }
+      console.error("Failed to delete item", error);
+      setVaultError(error.message || "Unable to delete the item from Supabase.");
     } finally {
       setIsProcessing(false);
     }
@@ -1720,22 +876,6 @@ export default function App() {
       const entries = [];
       const pathSegments = [...prefixSegments, item.name];
       if (item.type === "folder") {
-        if (storageMode === STORAGE_MODES.LOCAL) {
-          entries.push({
-            path: `${pathSegments.join("/")}/`,
-            data: new Uint8Array(0),
-            crc: 0,
-            isDirectory: true,
-            date: new Date(item.createdAt),
-            externalAttr: 0x10 << 16,
-          });
-          const children = scripts.filter((child) => child.parentId === item.id);
-          for (const child of children) {
-            const childEntries = await gatherScriptEntries(child, pathSegments);
-            entries.push(...childEntries);
-          }
-          return entries;
-        }
         entries.push({
           path: `${pathSegments.join("/")}/`,
           data: new Uint8Array(0),
@@ -1751,29 +891,16 @@ export default function App() {
         }
         return entries;
       }
-      if (storageMode === STORAGE_MODES.LOCAL) {
-        const buffer = base64ToUint8Array(item.content);
-        entries.push({
-          path: pathSegments.join("/"),
-          data: buffer,
-          crc: crc32(buffer),
-          date: new Date(item.createdAt),
-        });
-      } else {
-        const response = await driveApiFetch(
-          `https://www.googleapis.com/drive/v3/files/${item.id}?alt=media`
-        );
-        const buffer = new Uint8Array(await response.arrayBuffer());
-        entries.push({
-          path: pathSegments.join("/"),
-          data: buffer,
-          crc: crc32(buffer),
-          date: new Date(item.createdAt),
-        });
-      }
+      const buffer = base64ToUint8Array(item.content);
+      entries.push({
+        path: pathSegments.join("/"),
+        data: buffer,
+        crc: crc32(buffer),
+        date: new Date(item.createdAt),
+      });
       return entries;
     },
-    [driveApiFetch, scripts, storageMode]
+    [scripts]
   );
 
   const handleDownload = async (category, item) => {
@@ -1790,28 +917,17 @@ export default function App() {
         return;
       }
       if (item.type === "file") {
-        if (storageMode === STORAGE_MODES.LOCAL) {
-          const buffer = base64ToUint8Array(item.content);
-          const blob = new Blob([buffer], { type: item.mimeType || "application/octet-stream" });
-          downloadBlob(blob, item.name);
-        } else {
-          const response = await driveApiFetch(
-            `https://www.googleapis.com/drive/v3/files/${item.id}?alt=media`
-          );
-          const blob = await response.blob();
-          downloadBlob(blob, item.name);
-        }
+        const buffer = base64ToUint8Array(item.content);
+        const blob = new Blob([buffer], { type: item.mimeType || "application/octet-stream" });
+        downloadBlob(blob, item.name);
         return;
       }
       const entries = await gatherScriptEntries(item);
       const zip = createZip(entries);
       downloadBlob(zip, `${safeFileName(item.name)}.zip`);
     } catch (error) {
-      if (storageMode === STORAGE_MODES.LOCAL) {
-        handleLocalError(error, "Failed to download from your browser vault. Try again.");
-      } else {
-        handleDriveError(error);
-      }
+      console.error("Failed to download item", error);
+      setVaultError(error.message || "Unable to download the requested item.");
     } finally {
       setIsProcessing(false);
     }
@@ -1861,15 +977,7 @@ export default function App() {
       const script = scriptsById.get(id);
       if (!script) continue;
       if (script.type === "file") {
-        let buffer;
-        if (storageMode === STORAGE_MODES.LOCAL) {
-          buffer = base64ToUint8Array(script.content);
-        } else {
-          const response = await driveApiFetch(
-            `https://www.googleapis.com/drive/v3/files/${script.id}?alt=media`
-          );
-          buffer = new Uint8Array(await response.arrayBuffer());
-        }
+        const buffer = base64ToUint8Array(script.content);
         addEntry({
           path: ["Scripts", ...scriptPath(script)].join("/"),
           data: buffer,
@@ -1884,15 +992,7 @@ export default function App() {
     }
 
     return entries;
-  }, [
-    gatherScriptEntries,
-    driveApiFetch,
-    links,
-    prompts,
-    scriptsById,
-    selectedItems,
-    storageMode,
-  ]);
+  }, [gatherScriptEntries, links, prompts, scriptsById, selectedItems]);
 
   const handleBulkDownload = async () => {
     if (!selectedItems.length) return;
@@ -1903,11 +1003,8 @@ export default function App() {
       const zip = createZip(entries);
       downloadBlob(zip, `vault-bulk-download-${Date.now()}.zip`);
     } catch (error) {
-      if (storageMode === STORAGE_MODES.LOCAL) {
-        handleLocalError(error, "Failed to bundle the download from your browser vault. Try again.");
-      } else {
-        handleDriveError(error);
-      }
+      console.error("Failed to bundle download", error);
+      setVaultError(error.message || "Unable to build the bulk download archive.");
     } finally {
       setIsProcessing(false);
     }
@@ -1915,7 +1012,7 @@ export default function App() {
 
   const handleEditSubmit = async (event) => {
     event.preventDefault();
-    if (!editingItem) return;
+    if (!editingItem || !supabaseReady) return;
     const form = new FormData(event.currentTarget);
     const name = String(form.get("name") || "").trim();
     const notes = String(form.get("notes") || "").trim();
@@ -1923,147 +1020,33 @@ export default function App() {
 
     try {
       setIsProcessing(true);
-      if (storageMode === STORAGE_MODES.LOCAL) {
-        clearDriveError();
-        if (editingItem.category === "prompts") {
-          const description = String(form.get("description") || "").trim();
-          setPrompts((prev) =>
-            prev.map((entry) =>
-              entry.id === editingItem.item.id ? { ...entry, name, description, notes } : entry
-            )
-          );
-          setPreview((prevPreview) => {
-            if (!prevPreview || prevPreview.category !== "prompts" || prevPreview.item.id !== editingItem.item.id) {
-              return prevPreview;
-            }
-            return {
-              ...prevPreview,
-              item: { ...prevPreview.item, name, description, notes },
-            };
-          });
-        } else if (editingItem.category === "links") {
-          const url = String(form.get("url") || "").trim();
-          setLinks((prev) =>
-            prev.map((entry) => (entry.id === editingItem.item.id ? { ...entry, name, url, notes } : entry))
-          );
-          setPreview((prevPreview) => {
-            if (!prevPreview || prevPreview.category !== "links" || prevPreview.item.id !== editingItem.item.id) {
-              return prevPreview;
-            }
-            return {
-              ...prevPreview,
-              item: { ...prevPreview.item, name, url, notes },
-            };
-          });
-        } else if (editingItem.category === "scripts") {
-          setScripts((prev) =>
-            prev.map((entry) =>
-              entry.id === editingItem.item.id
-                ? {
-                    ...entry,
-                    name,
-                    notes,
-                    ...(entry.type === "file" ? { originalName: name } : {}),
-                  }
-                : entry
-            )
-          );
-          setPreview((prevPreview) => {
-            if (!prevPreview || prevPreview.category !== "scripts" || prevPreview.item.id !== editingItem.item.id) {
-              return prevPreview;
-            }
-            return {
-              ...prevPreview,
-              item: {
-                ...prevPreview.item,
-                name,
-                notes,
-                ...(prevPreview.item.type === "file" ? { originalName: name } : {}),
-              },
-            };
-          });
-        }
-        setEditingItem(null);
-        return;
-      }
-
-      await ensureDriveToken();
-
       if (editingItem.category === "prompts") {
         const description = String(form.get("description") || "").trim();
-        const payload = {
-          name,
-          description,
-          notes,
-          uploader: editingItem.item.uploader,
-          uploaderEmail: editingItem.item.uploaderEmail,
-          createdAt: editingItem.item.createdAt,
-        };
-        await window.gapi.client.drive.files.update({
-          fileId: editingItem.item.id,
-          resource: {
-            name: safeFileName(name, "json"),
-            description: notes,
-          },
-          media: {
-            mimeType: "application/json",
-            body: new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }),
-          },
+        await supabaseRequest(`prompts?id=eq.${encodeURIComponent(editingItem.item.id)}`, {
+          method: "PATCH",
+          headers: { Prefer: "return=representation" },
+          body: JSON.stringify({ name, description, notes }),
         });
         setPrompts((prev) =>
           prev.map((entry) =>
             entry.id === editingItem.item.id ? { ...entry, name, description, notes } : entry
           )
         );
-        setPreview((prevPreview) => {
-          if (!prevPreview || prevPreview.category !== "prompts" || prevPreview.item.id !== editingItem.item.id) {
-            return prevPreview;
-          }
-          return {
-            ...prevPreview,
-            item: { ...prevPreview.item, name, description, notes },
-          };
-        });
       } else if (editingItem.category === "links") {
         const url = String(form.get("url") || "").trim();
-        const payload = {
-          name,
-          url,
-          notes,
-          uploader: editingItem.item.uploader,
-          uploaderEmail: editingItem.item.uploaderEmail,
-          createdAt: editingItem.item.createdAt,
-        };
-        await window.gapi.client.drive.files.update({
-          fileId: editingItem.item.id,
-          resource: {
-            name: safeFileName(name, "json"),
-            description: notes,
-          },
-          media: {
-            mimeType: "application/json",
-            body: new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }),
-          },
+        await supabaseRequest(`links?id=eq.${encodeURIComponent(editingItem.item.id)}`, {
+          method: "PATCH",
+          headers: { Prefer: "return=representation" },
+          body: JSON.stringify({ name, url, notes }),
         });
         setLinks((prev) =>
           prev.map((entry) => (entry.id === editingItem.item.id ? { ...entry, name, url, notes } : entry))
         );
-        setPreview((prevPreview) => {
-          if (!prevPreview || prevPreview.category !== "links" || prevPreview.item.id !== editingItem.item.id) {
-            return prevPreview;
-          }
-          return {
-            ...prevPreview,
-            item: { ...prevPreview.item, name, url, notes },
-          };
-        });
       } else if (editingItem.category === "scripts") {
-        await window.gapi.client.drive.files.update({
-          fileId: editingItem.item.id,
-          resource: {
-            name,
-            description: notes,
-          },
+        await supabaseRequest(`scripts?id=eq.${encodeURIComponent(editingItem.item.id)}`, {
+          method: "PATCH",
+          headers: { Prefer: "return=representation" },
+          body: JSON.stringify({ name, notes }),
         });
         setScripts((prev) =>
           prev.map((entry) =>
@@ -2072,182 +1055,144 @@ export default function App() {
                   ...entry,
                   name,
                   notes,
-                  ...(entry.type === "file" ? { originalName: name } : {}),
+                  ...(entry.type === "file" ? { originalName: entry.originalName || name } : {}),
                 }
               : entry
           )
         );
-        setPreview((prevPreview) => {
-          if (!prevPreview || prevPreview.category !== "scripts" || prevPreview.item.id !== editingItem.item.id) {
-            return prevPreview;
-          }
-          return {
-            ...prevPreview,
-            item: {
-              ...prevPreview.item,
-              name,
-              notes,
-              ...(prevPreview.item.type === "file" ? { originalName: name } : {}),
-            },
-          };
-        });
       }
+
+      setPreview((prevPreview) => {
+        if (!prevPreview || prevPreview.item.id !== editingItem.item.id || prevPreview.category !== editingItem.category) {
+          return prevPreview;
+        }
+        if (editingItem.category === "prompts") {
+          const description = String(form.get("description") || "").trim();
+          return { ...prevPreview, item: { ...prevPreview.item, name, description, notes } };
+        }
+        if (editingItem.category === "links") {
+          const url = String(form.get("url") || "").trim();
+          return { ...prevPreview, item: { ...prevPreview.item, name, url, notes } };
+        }
+        return { ...prevPreview, item: { ...prevPreview.item, name, notes } };
+      });
 
       setEditingItem(null);
     } catch (error) {
-      if (storageMode === STORAGE_MODES.LOCAL) {
-        handleLocalError(error, "Failed to update the item in your browser vault. Try again.");
-      } else {
-        handleDriveError(error);
-      }
+      console.error("Failed to update item", error);
+      setVaultError(error.message || "Unable to update the item in Supabase.");
     } finally {
       setIsProcessing(false);
     }
   };
 
-  const openContextMenu = (event, category, item) => {
+  const handleContextMenu = (event, category, item) => {
     event.preventDefault();
-    setContextMenu({ category, item, x: event.clientX, y: event.clientY });
+    setContextMenu({ x: event.clientX, y: event.clientY, category, item });
   };
 
   const renderListItem = (category, item) => {
-    const isActive = preview && preview.category === category && preview.item.id === item.id;
     const isSelected = selectedItems.some((entry) => entry.category === category && entry.id === item.id);
-    const Icon = category === "prompts" ? FileText : category === "links" ? Link2 : item.type === "folder" ? Folder : FileText;
-
+    const Icon =
+      category === "prompts" ? FileText : category === "links" ? Link2 : item.type === "folder" ? Folder : FileText;
     return (
-      <div
+      <button
         key={item.id}
         onClick={() => setPreview({ category, item })}
-        onDoubleClick={() => {
-          if (category === "scripts" && item.type === "folder") {
-            setCurrentScriptFolderId(item.id);
-          }
-        }}
-        onContextMenu={(event) => openContextMenu(event, category, item)}
-        className={`group flex items-center justify-between gap-3 rounded-xl border border-white/5 bg-white/5 px-4 py-3 transition hover:border-white/10 hover:bg-white/10 ${
-          isActive ? "border-[#2ea043] bg-[#238636]/10" : ""
+        onContextMenu={(event) => handleContextMenu(event, category, item)}
+        className={`group flex w-full items-center justify-between rounded-2xl border border-white/5 bg-white/5 p-4 text-left transition hover:border-white/20 hover:bg-white/10 ${
+          isSelected ? "border-[#1f6feb]/60 bg-[#1f6feb]/10" : ""
         }`}
       >
-        <div className="flex flex-1 items-center gap-3">
-          <input
-            type="checkbox"
-            checked={isSelected}
-            onChange={() => toggleSelection(category, item.id)}
-            onClick={(event) => event.stopPropagation()}
-            className="h-4 w-4 rounded border-white/20 bg-transparent text-[#2ea043] focus:ring-0"
-          />
-          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-white/10 text-white">
+        <div className="flex items-center gap-4">
+          <div
+            className={`flex h-12 w-12 items-center justify-center rounded-xl ${
+              category === "prompts"
+                ? "bg-[#238636]/15 text-[#3fb950]"
+                : category === "links"
+                ? "bg-[#bf3989]/15 text-[#f778ba]"
+                : item.type === "folder"
+                ? "bg-[#d29922]/20 text-[#f2cc60]"
+                : "bg-[#1f6feb]/15 text-[#58a6ff]"
+            }`}
+          >
             <Icon className="h-5 w-5" />
           </div>
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-semibold text-white">{item.name}</p>
-            <p className="mt-0.5 truncate text-xs text-slate-400">
-              Uploaded by {item.uploader} · {formatDateTime(item.createdAt)}
+          <div>
+            <div className="flex items-center gap-2">
+              <p className="text-lg font-semibold text-white">{item.name}</p>
+              {category === "scripts" && item.type === "folder" && (
+                <Badge className="rounded-full bg-[#d29922]/20 text-xs text-[#f2cc60]">Folder</Badge>
+              )}
+            </div>
+            <p className="mt-1 text-xs text-slate-400">
+              Uploaded by {item.uploader} • {formatDateTime(item.createdAt)}
             </p>
           </div>
-          {category === "scripts" && item.type === "file" && (
-            <span className="text-xs text-slate-500">{(item.size / 1024).toFixed(1)} KB</span>
-          )}
         </div>
-        <button
-          onClick={(event) => {
-            event.stopPropagation();
-            openContextMenu(event, category, item);
-          }}
-          className="rounded-md p-2 text-slate-400 transition hover:bg-white/10 hover:text-white"
-        >
-          <MoreHorizontal className="h-4 w-4" />
-        </button>
-      </div>
+        <div className="flex items-center gap-3 opacity-0 transition group-hover:opacity-100">
+          <button
+            onClick={(event) => {
+              event.stopPropagation();
+              toggleSelection(category, item.id);
+            }}
+            className={`rounded-full border border-white/10 px-3 py-1 text-xs font-medium transition ${
+              isSelected ? "bg-white/20 text-white" : "hover:bg-white/10 text-slate-300"
+            }`}
+          >
+            {isSelected ? "Selected" : "Select"}
+          </button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="text-slate-400 hover:bg-white/10 hover:text-white"
+            onClick={(event) => {
+              event.stopPropagation();
+              handleContextMenu(event, category, item);
+            }}
+          >
+            <MoreHorizontal className="h-4 w-4" />
+          </Button>
+        </div>
+      </button>
     );
   };
 
-  const adminOnly = currentUser?.role === "admin";
-
-  const renderContextMenu = () => {
-    if (!contextMenu) return null;
-    const style = { top: contextMenu.y, left: contextMenu.x };
-    return (
-      <div
-        style={style}
-        onClick={(event) => event.stopPropagation()}
-        className="fixed z-50 w-44 overflow-hidden rounded-lg border border-white/10 bg-[#161b22] shadow-2xl"
-      >
-        <button
-          disabled={isBusy || !storageReadyForActions}
-          onClick={async () => {
-            await handleDownload(contextMenu.category, contextMenu.item);
-            setContextMenu(null);
-          }}
-          className="flex w-full items-center gap-2 px-4 py-2 text-sm text-slate-200 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          <Download className="h-4 w-4" /> Download
-        </button>
-        <button
-          disabled={isBusy || !storageReadyForActions}
-          onClick={() => {
-            setEditingItem({ category: contextMenu.category, item: contextMenu.item });
-            setContextMenu(null);
-          }}
-          className="flex w-full items-center gap-2 px-4 py-2 text-sm text-slate-200 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          <PencilLine className="h-4 w-4" /> Edit
-        </button>
-        <button
-          disabled={isBusy || !storageReadyForActions}
-          onClick={async () => {
-            await handleDelete(contextMenu.category, contextMenu.item.id);
-            setContextMenu(null);
-          }}
-          className="flex w-full items-center gap-2 px-4 py-2 text-sm text-rose-300 transition hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          <Trash2 className="h-4 w-4" /> Delete
-        </button>
-      </div>
-    );
-  };
   const renderPreview = () => {
     if (!preview) {
       return (
-        <Card className="border-white/5 bg-white/5 text-slate-200">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-3 text-lg font-semibold text-white">
-              <Database className="h-5 w-5" /> Item Preview
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-sm text-slate-400">
-              Select an item on the left to inspect metadata, notes, and quick actions. Notes will appear here for easy review.
-            </p>
+        <Card className="border-white/10 bg-[#0d1117] text-white">
+          <CardContent className="flex h-full flex-col items-center justify-center gap-3 py-16 text-center text-slate-400">
+            <Database className="h-10 w-10 text-slate-500" />
+            <p className="max-w-xs text-sm">Select a prompt, script, or link to see its details here.</p>
           </CardContent>
         </Card>
       );
     }
 
     const { category, item } = preview;
-
     return (
-      <Card className="border-white/5 bg-white/5 text-slate-200">
-        <CardHeader className="flex flex-col gap-2">
-          <CardTitle className="flex items-center gap-3 text-lg font-semibold text-white">
-            {category === "prompts" && <FileText className="h-5 w-5" />}
-            {category === "links" && <Link2 className="h-5 w-5" />}
-            {category === "scripts" && (item.type === "folder" ? <Folder className="h-5 w-5" /> : <FileText className="h-5 w-5" />)}
-            {item.name}
-          </CardTitle>
-          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
-            <Badge className="bg-white/10 text-xs text-white">{category.toUpperCase()}</Badge>
-            <span>Uploaded by {item.uploader}</span>
-            <span>· {formatDateTime(item.createdAt)}</span>
+      <Card className="border-white/10 bg-[#0d1117] text-white">
+        <CardHeader className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <CardTitle className="text-white">{item.name}</CardTitle>
+            <p className="mt-1 text-xs text-slate-400">
+              Uploaded by {item.uploader} • {formatDateTime(item.createdAt)}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Badge className="bg-white/10 text-xs text-slate-200">{category.toUpperCase()}</Badge>
+            {category === "scripts" && item.type === "folder" && (
+              <Badge className="bg-[#d29922]/20 text-xs text-[#f2cc60]">Folder</Badge>
+            )}
           </div>
         </CardHeader>
-        <CardContent className="space-y-4">
+        <CardContent className="space-y-5">
           {category === "prompts" && (
-            <div className="space-y-3">
+            <div className="space-y-4">
               <div>
                 <p className="text-xs uppercase tracking-wide text-slate-400">Description</p>
-                <p className="mt-1 rounded-lg border border-white/5 bg-black/20 p-3 text-sm text-slate-100">
+                <p className="mt-1 whitespace-pre-wrap rounded-lg border border-white/5 bg-black/20 p-3 text-sm text-slate-100">
                   {item.description || "No description provided."}
                 </p>
               </div>
@@ -2260,16 +1205,16 @@ export default function App() {
             </div>
           )}
           {category === "links" && (
-            <div className="space-y-3">
+            <div className="space-y-4">
               <div>
                 <p className="text-xs uppercase tracking-wide text-slate-400">URL</p>
                 <a
                   href={item.url}
                   target="_blank"
                   rel="noreferrer"
-                  className="mt-1 inline-flex items-center gap-2 rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-sm text-[#58a6ff] hover:text-white"
+                  className="mt-1 inline-flex items-center gap-2 rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-sm text-[#58a6ff] hover:bg-white/5"
                 >
-                  <Link2 className="h-4 w-4" /> {item.url}
+                  {item.url}
                 </a>
               </div>
               <div>
@@ -2281,22 +1226,18 @@ export default function App() {
             </div>
           )}
           {category === "scripts" && (
-            <div className="space-y-3">
+            <div className="space-y-4">
               {item.type === "file" ? (
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-sm">
-                    <span className="text-slate-300">Original file</span>
-                    <span className="text-slate-400">{item.originalName}</span>
-                  </div>
-                  <div className="flex items-center justify-between rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-sm">
-                    <span className="text-slate-300">Size</span>
-                    <span className="text-slate-400">{(item.size / 1024).toFixed(1)} KB</span>
-                  </div>
+                <div className="rounded-lg border border-white/5 bg-black/20 p-4 text-sm text-slate-300">
+                  <p className="font-semibold text-white">File details</p>
+                  <p className="mt-2">Original name: {item.originalName || item.name}</p>
+                  <p>Size: {item.size ? `${(item.size / 1024).toFixed(1)} KB` : "Unknown"}</p>
+                  <p>Type: {item.mimeType}</p>
                 </div>
               ) : (
-                <div className="space-y-2">
-                  <p className="text-xs uppercase tracking-wide text-slate-400">Folder contents</p>
-                  <div className="max-h-48 space-y-1 overflow-y-auto rounded-lg border border-white/5 bg-black/20 p-3 text-sm">
+                <div className="rounded-lg border border-white/5 bg-black/20 p-4 text-sm text-slate-300">
+                  <p className="font-semibold text-white">Folder contents</p>
+                  <div className="mt-3 space-y-2">
                     {scripts
                       .filter((child) => child.parentId === item.id)
                       .map((child) => (
@@ -2327,7 +1268,7 @@ export default function App() {
           <div className="flex flex-wrap items-center gap-2">
             <Button
               onClick={async () => handleDownload(category, item)}
-              disabled={isBusy || !storageReadyForActions}
+              disabled={isBusy}
               className="bg-[#1f6feb] text-white hover:bg-[#388bfd] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
             >
               <Download className="mr-2 h-4 w-4" /> Download
@@ -2351,20 +1292,27 @@ export default function App() {
     const { category, item } = editingItem;
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4 py-6">
-        <div className="w-full max-w-xl rounded-2xl border border-white/10 bg-[#161b22] p-6 shadow-2xl">
+        <div className="w-full max-w-xl rounded-2xl border border-white/10 bg-[#0d1117] p-6 shadow-2xl">
           <div className="flex items-start justify-between">
             <div>
               <h3 className="text-xl font-semibold text-white">Edit {category.slice(0, 1).toUpperCase() + category.slice(1)}</h3>
               <p className="mt-1 text-sm text-slate-400">Update the name or notes for this entry.</p>
             </div>
-            <button onClick={() => setEditingItem(null)} className="rounded-full p-2 text-slate-400 hover:bg-white/10 hover:text-white">
+            <button
+              onClick={() => setEditingItem(null)}
+              className="rounded-full p-2 text-slate-400 hover:bg-white/10 hover:text-white"
+            >
               ✕
             </button>
           </div>
           <form onSubmit={handleEditSubmit} className="mt-6 space-y-4">
             <div>
               <label className="text-xs uppercase tracking-wide text-slate-400">Name</label>
-              <Input name="name" defaultValue={item.name} className="mt-2 border-white/10 bg-black/40 text-white" />
+              <Input
+                name="name"
+                defaultValue={item.name}
+                className="mt-2 border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+              />
             </div>
             {category === "prompts" && (
               <div>
@@ -2372,19 +1320,27 @@ export default function App() {
                 <Textarea
                   name="description"
                   defaultValue={item.description}
-                  className="mt-2 min-h-[100px] border-white/10 bg-black/40 text-white"
+                  className="mt-2 min-h-[100px] border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
                 />
               </div>
             )}
             {category === "links" && (
               <div>
                 <label className="text-xs uppercase tracking-wide text-slate-400">URL</label>
-                <Input name="url" defaultValue={item.url} className="mt-2 border-white/10 bg-black/40 text-white" />
+                <Input
+                  name="url"
+                  defaultValue={item.url}
+                  className="mt-2 border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+                />
               </div>
             )}
             <div>
               <label className="text-xs uppercase tracking-wide text-slate-400">Notes</label>
-              <Textarea name="notes" defaultValue={item.notes} className="mt-2 min-h-[120px] border-white/10 bg-black/40 text-white" />
+              <Textarea
+                name="notes"
+                defaultValue={item.notes}
+                className="mt-2 min-h-[120px] border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+              />
             </div>
             <div className="flex justify-end gap-3">
               <Button
@@ -2405,27 +1361,69 @@ export default function App() {
     );
   };
 
+  const renderContextMenu = () => {
+    if (!contextMenu) return null;
+    const { x, y, category, item } = contextMenu;
+    return (
+      <div
+        ref={contextMenuRef}
+        className="fixed z-40 w-48 rounded-xl border border-white/10 bg-[#0d1117] p-2 shadow-xl"
+        style={{ left: x, top: y }}
+      >
+        <button
+          onClick={async () => {
+            await handleDownload(category, item);
+            setContextMenu(null);
+          }}
+          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-200 transition hover:bg-white/10"
+        >
+          <Download className="h-4 w-4" /> Download
+        </button>
+        <button
+          onClick={() => {
+            setEditingItem({ category, item });
+            setContextMenu(null);
+          }}
+          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-200 transition hover:bg-white/10"
+        >
+          <PencilLine className="h-4 w-4" /> Edit
+        </button>
+        <button
+          onClick={async () => {
+            await handleDelete(category, item.id);
+            setContextMenu(null);
+          }}
+          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-rose-300 transition hover:bg-rose-500/20"
+        >
+          <Trash2 className="h-4 w-4" /> Delete
+        </button>
+      </div>
+    );
+  };
+
   const renderAuthScreen = () => (
-    <div className="flex min-h-screen flex-col items-center justify-center bg-gradient-to-br from-[#010409] via-[#0d1117] to-[#1f6feb]/20 px-6 py-12 text-white">
+    <div className="flex min-h-screen flex-col items-center justify-center bg-gradient-to-br from-[#010409] via-[#0d1117] to-[#1f6feb]/30 px-6 py-12 text-white">
       <div className="w-full max-w-md space-y-8">
         <div className="text-center">
           <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-3xl bg-[#238636]/20 text-[#3fb950]">
             <Lock className="h-8 w-8" />
           </div>
           <h1 className="mt-4 text-3xl font-bold">VaultHub Login</h1>
-          <p className="mt-2 text-sm text-slate-400">
+          <p className="mt-2 text-sm text-slate-300">
             Securely store prompts, scripts, and research links for your creative team. Only approved email addresses can register.
           </p>
         </div>
-        <Card className="border-white/10 bg-[#161b22] text-white">
+        <Card className="border-white/10 bg-[#0d1117] text-white shadow-2xl">
           <CardContent className="space-y-6 pt-6">
-            <div className="flex rounded-full border border-white/10 bg-black/30 p-1 text-sm">
+            <div className="flex rounded-full border border-white/10 bg-white/10 p-1 text-sm">
               <button
                 onClick={() => {
                   setAuthView("login");
                   setAuthError("");
                 }}
-                className={`flex-1 rounded-full px-4 py-2 transition ${authView === "login" ? "bg-[#238636]" : "hover:bg-white/5"}`}
+                className={`flex-1 rounded-full px-4 py-2 font-medium transition ${
+                  authView === "login" ? "bg-[#238636] text-white" : "text-slate-200 hover:bg-white/10"
+                }`}
               >
                 <div className="flex items-center justify-center gap-2">
                   <LogIn className="h-4 w-4" /> Login
@@ -2436,7 +1434,9 @@ export default function App() {
                   setAuthView("register");
                   setAuthError("");
                 }}
-                className={`flex-1 rounded-full px-4 py-2 transition ${authView === "register" ? "bg-[#1f6feb]" : "hover:bg-white/5"}`}
+                className={`flex-1 rounded-full px-4 py-2 font-medium transition ${
+                  authView === "register" ? "bg-[#1f6feb] text-white" : "text-slate-200 hover:bg-white/10"
+                }`}
               >
                 <div className="flex items-center justify-center gap-2">
                   <UserPlus className="h-4 w-4" /> Register
@@ -2444,7 +1444,7 @@ export default function App() {
               </button>
             </div>
             {authError && (
-              <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+              <div className="rounded-lg border border-rose-500/40 bg-rose-500/15 px-4 py-3 text-sm text-rose-100">
                 {authError}
               </div>
             )}
@@ -2452,16 +1452,32 @@ export default function App() {
               {authView === "register" && (
                 <div>
                   <label className="text-xs uppercase tracking-wide text-slate-400">Name</label>
-                  <Input name="name" placeholder="How should we call you?" className="mt-1 border-white/10 bg-black/40 text-white" />
+                  <Input
+                    name="name"
+                    placeholder="How should we call you?"
+                    className="mt-1 border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+                  />
                 </div>
               )}
               <div>
                 <label className="text-xs uppercase tracking-wide text-slate-400">Email</label>
-                <Input name="email" type="email" placeholder="you@example.com" className="mt-1 border-white/10 bg-black/40 text-white" required />
+                <Input
+                  name="email"
+                  type="email"
+                  placeholder="you@example.com"
+                  className="mt-1 border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+                  required
+                />
               </div>
               <div>
                 <label className="text-xs uppercase tracking-wide text-slate-400">Password</label>
-                <Input name="password" type="password" placeholder="••••••••" className="mt-1 border-white/10 bg-black/40 text-white" required />
+                <Input
+                  name="password"
+                  type="password"
+                  placeholder="••••••••"
+                  className="mt-1 border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+                  required
+                />
               </div>
               <Button type="submit" className="w-full bg-[#238636] text-white hover:bg-[#2ea043]">
                 {authView === "login" ? (
@@ -2475,7 +1491,7 @@ export default function App() {
                 )}
               </Button>
             </form>
-            <p className="text-center text-xs text-slate-500">
+            <p className="text-center text-xs text-slate-400">
               Need access? Ask an administrator to approve your email from the admin control room.
             </p>
           </CardContent>
@@ -2483,26 +1499,30 @@ export default function App() {
       </div>
     </div>
   );
+
   const renderAdminPanel = () => (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h2 className="text-2xl font-semibold text-white">Admin Control Room</h2>
-          <p className="mt-1 text-sm text-slate-400">Manage who can register, review members, and keep your workspace secure.</p>
+          <p className="mt-1 text-sm text-slate-300">
+            Manage who can register, review members, and keep your workspace secure.
+          </p>
         </div>
         <Badge className="bg-[#238636]/20 text-[#3fb950]">
           <ShieldCheck className="mr-2 h-4 w-4" /> Administrator
         </Badge>
       </div>
       <div className="grid gap-6 lg:grid-cols-2">
-        <Card className="border-white/10 bg-[#161b22] text-white">
+        <Card className="border-white/10 bg-[#0d1117] text-white">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-white">
-              <Users className="h-5 w-5 text-[#58a6ff]" /> Approved email list
+              <Users className="h-5 w-5 text-[#58a6ff]" /> Approved email addresses
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
             <form
+              className="flex flex-col gap-3 sm:flex-row"
               onSubmit={(event) => {
                 event.preventDefault();
                 const form = new FormData(event.currentTarget);
@@ -2511,53 +1531,66 @@ export default function App() {
                 setAllowedEmails((prev) => [...prev, email]);
                 event.currentTarget.reset();
               }}
-              className="flex gap-3"
             >
-              <Input name="email" placeholder="new-user@example.com" className="border-white/10 bg-black/40 text-white" />
+              <Input
+                name="email"
+                type="email"
+                placeholder="new.teammate@example.com"
+                className="flex-1 border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+                required
+              />
               <Button type="submit" className="bg-[#1f6feb] text-white hover:bg-[#388bfd]">
                 Grant access
               </Button>
             </form>
             <div className="space-y-2">
               {allowedEmails.map((email) => (
-                <div key={email} className="flex items-center justify-between rounded-lg border border-white/5 bg-black/30 px-4 py-2 text-sm">
+                <div
+                  key={email}
+                  className="flex items-center justify-between rounded-xl border border-white/5 bg-white/5 px-3 py-2 text-sm"
+                >
                   <span className="text-slate-200">{email}</span>
-                  {!protectedAdminEmails.has(email) && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => {
-                        setAllowedEmails((prev) => prev.filter((value) => value !== email));
-                        setUsers((prev) => prev.filter((user) => user.email !== email));
-                      }}
-                      className="border-white/10 bg-white/5 text-rose-300 hover:bg-rose-500/20"
-                    >
-                      Remove
-                    </Button>
-                  )}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={protectedAdminEmails.has(email)}
+                    className="text-rose-300 hover:bg-rose-500/20 hover:text-rose-100 disabled:cursor-not-allowed disabled:text-slate-500"
+                    onClick={() => {
+                      if (protectedAdminEmails.has(email)) return;
+                      setAllowedEmails((prev) => prev.filter((entry) => entry !== email));
+                    }}
+                  >
+                    Remove
+                  </Button>
                 </div>
               ))}
-              {!allowedEmails.length && <p className="text-sm text-slate-500">No email addresses have been approved yet.</p>}
+              {!allowedEmails.length && (
+                <p className="text-sm text-slate-500">No email addresses have been approved yet.</p>
+              )}
             </div>
           </CardContent>
         </Card>
-        <Card className="border-white/10 bg-[#161b22] text-white">
+        <Card className="border-white/10 bg-[#0d1117] text-white">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-white">
-              <Users className="h-5 w-5 text-[#238636]" /> Registered members
+              <ShieldCheck className="h-5 w-5 text-[#3fb950]" /> Vault members
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
             {users.map((user) => (
-              <div key={user.id} className="flex items-center justify-between rounded-lg border border-white/5 bg-black/30 px-4 py-3 text-sm">
+              <div
+                key={user.id}
+                className="flex items-center justify-between rounded-xl border border-white/5 bg-white/5 px-4 py-3"
+              >
                 <div>
                   <p className="font-semibold text-white">{user.name}</p>
                   <p className="text-xs text-slate-400">{user.email}</p>
                 </div>
-                <Badge className="bg-white/10 text-xs text-slate-300">{user.role === "admin" ? "Admin" : "Member"}</Badge>
+                <Badge className={`rounded-full ${user.role === "admin" ? "bg-[#238636]/20 text-[#3fb950]" : "bg-white/10 text-slate-200"}`}>
+                  {user.role === "admin" ? "Admin" : "Member"}
+                </Badge>
               </div>
             ))}
-            {!users.length && <p className="text-sm text-slate-500">No one has registered yet.</p>}
           </CardContent>
         </Card>
       </div>
@@ -2569,347 +1602,309 @@ export default function App() {
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h1 className="text-3xl font-bold text-white">Vault Dashboard</h1>
-          <p className="mt-2 text-sm text-slate-400">Organise prompts, automation scripts, and research links with a familiar GitHub aesthetic.</p>
+          <p className="mt-1 text-sm text-slate-300">
+            Organise prompts, automation scripts, and research links with a familiar GitHub aesthetic.
+          </p>
         </div>
-        <div className="flex flex-wrap items-center gap-3">
-          <Button
-            onClick={() => setActiveView(activeView === "dashboard" ? "admin" : "dashboard")}
-            className="bg-[#1f6feb] text-white hover:bg-[#388bfd]"
-          >
-            <ShieldCheck className="mr-2 h-4 w-4" /> {activeView === "dashboard" ? "Admin panel" : "Back to dashboard"}
-          </Button>
+        <div className="flex items-center gap-3">
+          {currentUser && (
+            <span className="rounded-full border border-white/10 bg-white/10 px-4 py-1 text-sm text-slate-200">
+              Signed in as <span className="font-semibold text-white">{currentUser.name}</span>
+            </span>
+          )}
           <Button
             variant="outline"
+            className="border-white/10 bg-white/5 text-white hover:bg-white/10"
+            onClick={() => setActiveView(activeView === "dashboard" ? "admin" : "dashboard")}
+          >
+            {activeView === "dashboard" ? "Admin panel" : "Back to dashboard"}
+          </Button>
+          <Button
             onClick={() => {
               setCurrentUser(null);
-              setPreview(null);
-              setSelectedItems([]);
-              setAuthView("login");
               setActiveView("dashboard");
-              setActiveTab("prompts");
-              setCurrentScriptFolderId(null);
             }}
-            className="border-white/10 bg-white/5 text-white hover:bg-white/10"
+            className="bg-[#bf3989] text-white hover:bg-[#f778ba]"
           >
             <LogOut className="mr-2 h-4 w-4" /> Sign out
           </Button>
         </div>
       </div>
 
-      {activeView === "admin" && !adminOnly && (
-        <div className="rounded-2xl border border-rose-500/40 bg-rose-500/10 p-4 text-sm text-rose-200">
-          You need administrator rights to manage access. Ask an admin to promote your account.
-        </div>
-      )}
+      <div className="grid gap-4 md:grid-cols-3">
+        {categories.map((category) => {
+          const Icon = category.icon;
+          return (
+            <div key={category.id} className={`rounded-2xl border border-white/5 bg-gradient-to-br ${category.accent} p-[1px]`}>
+              <div className="rounded-[1.05rem] bg-[#0d1117] p-5">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-slate-400">{category.label}</p>
+                    <p className="mt-2 text-3xl font-semibold text-white">{totals[category.id]}</p>
+                  </div>
+                  <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-white/10 text-white">
+                    <Icon className="h-6 w-6" />
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
 
-      {activeView === "admin" && adminOnly ? (
-        renderAdminPanel()
-      ) : (
-        <>
-          <div className="grid gap-4 md:grid-cols-3">
-            {categories.map((category) => {
-              const Icon = category.icon;
-              return (
-                <div key={category.id} className={`rounded-2xl border border-white/5 bg-gradient-to-br ${category.accent} p-[1px]`}>
-                  <div className="rounded-[1.05rem] bg-[#0d1117] p-5">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-xs uppercase tracking-wide text-slate-400">{category.label}</p>
-                        <p className="mt-2 text-3xl font-semibold text-white">{totals[category.id]}</p>
+      <div className="rounded-3xl border border-white/10 bg-[#0d1117] p-6">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#238636]/20 text-[#3fb950]">
+              <Database className="h-5 w-5" />
+            </div>
+            <div>
+              <h2 className="text-xl font-semibold text-white">Supabase vault</h2>
+              <p className="text-sm text-slate-400">
+                Files are stored in Supabase tables within your project&apos;s free tier database. Download or edit entries anytime.
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-3 text-sm">
+            <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-200">
+              <Cloud className="h-4 w-4 text-[#58a6ff]" /> {supabaseReady ? "Connected to Supabase" : "Storage not configured"}
+            </span>
+            {vaultStatus && <span className="text-xs text-slate-300">{vaultStatus}</span>}
+            {vaultError && (
+              <span className="rounded-full border border-rose-500/40 bg-rose-500/15 px-3 py-1 text-xs text-rose-100">
+                {vaultError}
+              </span>
+            )}
+            <Button
+              onClick={handleBulkDownload}
+              disabled={!selectedItems.length || isBusy || !supabaseReady}
+              className="bg-[#238636] text-white hover:bg-[#2ea043] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
+            >
+              <Download className="mr-2 h-4 w-4" /> Bulk download ({selectedItems.length})
+            </Button>
+          </div>
+        </div>
+
+        <div className="mt-6 grid gap-6 lg:grid-cols-[2fr_1fr]">
+          <div className="space-y-6">
+            <Card className="border-white/10 bg-[#0d1117]/60 text-white">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-white">
+                  <UploadCloud className="h-5 w-5 text-[#58a6ff]" /> Add to your vault
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center gap-3 text-sm text-slate-400">
+                  <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs uppercase tracking-wide">
+                    {scriptMode === "file" ? "Single upload" : "Folder upload"}
+                  </span>
+                  <div className="flex rounded-full border border-white/10 bg-white/5 p-1">
+                    <button
+                      onClick={() => {
+                        setScriptMode("file");
+                        setScriptFolderFiles([]);
+                      }}
+                      className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                        scriptMode === "file" ? "bg-[#1f6feb] text-white" : "text-slate-300 hover:bg-white/10"
+                      }`}
+                    >
+                      Script file
+                    </button>
+                    <button
+                      onClick={() => {
+                        setScriptMode("folder");
+                        setScriptFiles([]);
+                      }}
+                      className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                        scriptMode === "folder" ? "bg-[#238636] text-white" : "text-slate-300 hover:bg-white/10"
+                      }`}
+                    >
+                      Script folder
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mt-6 grid gap-6 lg:grid-cols-3">
+                  <div className="space-y-4 lg:col-span-2">
+                    <div className="rounded-2xl border border-white/5 bg-white/5 p-5">
+                      <h3 className="text-lg font-semibold text-white">Prompts</h3>
+                      <p className="mt-1 text-sm text-slate-400">Store reusable prompt templates with context and reminders.</p>
+                      <form onSubmit={handleAddPrompt} className="mt-4 space-y-3">
+                        <Input
+                          name="name"
+                          placeholder="Prompt title"
+                          className="border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+                          required
+                        />
+                        <Textarea
+                          name="description"
+                          placeholder="Short summary"
+                          className="min-h-[80px] border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+                        />
+                        <Textarea
+                          name="notes"
+                          placeholder="Paste the full prompt or any reminders"
+                          className="min-h-[120px] border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+                        />
+                        <Button
+                          type="submit"
+                          disabled={isBusy || !supabaseReady}
+                          className="bg-[#238636] text-white hover:bg-[#2ea043] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
+                        >
+                          Save prompt
+                        </Button>
+                      </form>
+                    </div>
+
+                    <div className="rounded-2xl border border-white/5 bg-white/5 p-5">
+                      <h3 className="text-lg font-semibold text-white">Scripts</h3>
+                      <p className="mt-1 text-sm text-slate-400">
+                        Upload individual automation files or drag entire folders to mirror their structure.
+                      </p>
+                      <form onSubmit={handleAddScript} className="mt-4 space-y-4">
+                        <Input
+                          name="name"
+                          placeholder={scriptMode === "file" ? "Display name" : "Folder name"}
+                          className="border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+                        />
+                        {scriptMode === "file" ? (
+                          <Input
+                            type="file"
+                            onChange={(event) => setScriptFiles(Array.from(event.target.files || []))}
+                            className="border border-white/10 bg-white/10 text-white file:mr-3 file:rounded-lg file:border-0 file:bg-[#1f6feb] file:px-4 file:py-2 file:text-sm file:text-white"
+                            required
+                          />
+                        ) : (
+                          <div className="space-y-2">
+                            <Input
+                              ref={folderInputRef}
+                              type="file"
+                              multiple
+                              onChange={(event) => setScriptFolderFiles(Array.from(event.target.files || []))}
+                              className="border border-white/10 bg-white/10 text-white file:mr-3 file:rounded-lg file:border-0 file:bg-[#1f6feb] file:px-4 file:py-2 file:text-sm file:text-white"
+                              required
+                            />
+                            {scriptFolderFiles.length > 0 && (
+                              <p className="text-xs text-slate-400">{scriptFolderFiles.length} items ready to upload</p>
+                            )}
+                          </div>
+                        )}
+                        <Textarea
+                          name="notes"
+                          placeholder="Context, setup steps, secrets, etc."
+                          className="min-h-[120px] border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+                        />
+                        <Button
+                          type="submit"
+                          disabled={isBusy || !supabaseReady}
+                          className="bg-[#1f6feb] text-white hover:bg-[#388bfd] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
+                        >
+                          Upload
+                        </Button>
+                      </form>
+                    </div>
+
+                    <div className="rounded-2xl border border-white/5 bg-white/5 p-5">
+                      <h3 className="text-lg font-semibold text-white">Links</h3>
+                      <p className="mt-1 text-sm text-slate-400">
+                        Save documentation, tutorials, and references with handy notes for collaborators.
+                      </p>
+                      <form onSubmit={handleAddLink} className="mt-4 space-y-3">
+                        <Input
+                          name="name"
+                          placeholder="Resource name"
+                          className="border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+                          required
+                        />
+                        <Input
+                          name="url"
+                          type="url"
+                          placeholder="https://"
+                          className="border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+                          required
+                        />
+                        <Textarea
+                          name="notes"
+                          placeholder="Why this link matters"
+                          className="min-h-[120px] border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+                        />
+                        <Button
+                          type="submit"
+                          disabled={isBusy || !supabaseReady}
+                          className="bg-[#bf3989] text-white hover:bg-[#f778ba] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
+                        >
+                          Save link
+                        </Button>
+                      </form>
+                    </div>
+                  </div>
+
+                  <div className="space-y-6">
+                    <div className="rounded-2xl border border-white/5 bg-white/5 p-5">
+                      <h3 className="text-lg font-semibold text-white">Prompts</h3>
+                      <div className="mt-3 space-y-2">
+                        {prompts.length ? (
+                          prompts
+                            .slice()
+                            .reverse()
+                            .map((prompt) => renderListItem("prompts", prompt))
+                        ) : (
+                          <EmptyState
+                            icon={FileText}
+                            title="No prompts yet"
+                            description="Upload your go-to prompt templates to access them quickly across projects."
+                          />
+                        )}
                       </div>
-                      <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-white/10 text-white">
-                        <Icon className="h-6 w-6" />
+                    </div>
+                    <div className="rounded-2xl border border-white/5 bg-white/5 p-5">
+                      <h3 className="text-lg font-semibold text-white">Links</h3>
+                      <div className="mt-3 space-y-2">
+                        {links.length ? (
+                          links
+                            .slice()
+                            .reverse()
+                            .map((link) => renderListItem("links", link))
+                        ) : (
+                          <EmptyState
+                            icon={Link2}
+                            title="No links saved"
+                            description="Collect tutorials, documentation, and reference URLs so your whole team stays aligned."
+                          />
+                        )}
                       </div>
                     </div>
                   </div>
                 </div>
-              );
-            })}
+              </CardContent>
+            </Card>
           </div>
 
-          <div className="rounded-3xl border border-white/10 bg-[#0d1117] p-6">
-            <div className="flex flex-wrap items-center justify-between gap-4">
-              <div className="flex items-center gap-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#238636]/20 text-[#3fb950]">
-                  <Database className="h-5 w-5" />
-                </div>
-                <div>
-                  <h2 className="text-xl font-semibold text-white">Workspace vault</h2>
-                  <p className="text-sm text-slate-400">Double-click folders to open them, right-click items for quick actions.</p>
-                </div>
-              </div>
-            <div className="flex flex-wrap items-center gap-3 text-sm">
-              <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/5 p-1 text-xs">
-                <button
-                  onClick={() => setStorageMode(STORAGE_MODES.DRIVE)}
-                  className={`rounded-full px-3 py-1 font-medium transition ${
-                    usingDrive ? "bg-[#1f6feb] text-white" : "text-slate-300 hover:bg-white/10"
-                  }`}
-                >
-                  Google Drive
-                </button>
-                <button
-                  onClick={() => setStorageMode(STORAGE_MODES.LOCAL)}
-                  className={`rounded-full px-3 py-1 font-medium transition ${
-                    usingLocal ? "bg-[#238636] text-white" : "text-slate-300 hover:bg-white/10"
-                  }`}
-                >
-                  Browser vault
-                </button>
-              </div>
-              {usingDrive ? (
-                <>
-                  <Button
-                    onClick={() => handleDriveConnect()}
-                    disabled={!driveClientReady || missingDriveCredentials || isBusy}
-                    className={`${
-                      driveConnected
-                        ? "border border-white/10 bg-white/5 text-white hover:bg-white/10"
-                        : "bg-[#1f6feb] text-white hover:bg-[#388bfd]"
-                    } disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500`}
-                  >
-                    <HardDrive className="mr-2 h-4 w-4" />
-                    {isBusy
-                      ? "Syncing..."
-                      : driveConnected
-                      ? "Refresh Drive"
-                      : "Connect Google Drive"}
-                  </Button>
-                  {driveProfile && (
-                    <span className="text-xs text-slate-400">
-                      Connected as <span className="text-slate-200">{driveProfile.displayName}</span>
-                      {driveProfile.emailAddress ? ` (${driveProfile.emailAddress})` : ""}
-                    </span>
-                  )}
-                </>
-              ) : (
-                <span className="text-xs text-slate-400">
-                  Stored privately on this device. Switch to Google Drive to sync across accounts.
-                </span>
-              )}
-              <Button
-                onClick={() => handleBulkDownload()}
-                disabled={!selectedItems.length || isBusy || !storageReadyForActions}
-                className="bg-[#238636] text-white hover:bg-[#2ea043] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
-              >
-                  <Download className="mr-2 h-4 w-4" /> Bulk download ({selectedItems.length})
-                </Button>
-              </div>
-            </div>
-
-            {driveError && (
-              <div className="mt-4 rounded-2xl border border-rose-500/40 bg-rose-500/10 p-4 text-sm text-rose-200">
-                <p className="font-medium text-rose-100">{driveError}</p>
-                {driveErrorInfo?.detail && (
-                  <p className="mt-2 whitespace-pre-line text-xs text-rose-100/80">
-                    Google Drive replied: {driveErrorInfo.detail}
-                  </p>
-                )}
-                {driveErrorInfo?.hint && (
-                  <p className="mt-3 text-xs text-rose-100/70">
-                    Try this next: {driveErrorInfo.hint}
-                  </p>
-                )}
-                {(driveErrorInfo?.reason || driveErrorInfo?.status || driveErrorInfo?.code) && (
-                  <p className="mt-3 text-[11px] font-mono text-rose-100/50">
-                    Debug codes → reason: {driveErrorInfo?.reason ?? "n/a"} | status: {driveErrorInfo?.status ?? "n/a"} | code: {driveErrorInfo?.code ?? "n/a"}
-                  </p>
-                )}
-              </div>
-            )}
-            {!driveError && driveBootstrapMessage && (
-              <div className="mt-4 rounded-2xl border border-slate-500/30 bg-slate-500/10 p-4 text-sm text-slate-200">
-                {driveBootstrapMessage}
-              </div>
-            )}
-            {usingDrive && !driveError && !driveBootstrapMessage && !driveReadyForActions && !isBusy && (
-              <div className="mt-4 rounded-2xl border border-amber-400/30 bg-amber-400/10 p-4 text-sm text-amber-100">
-                {missingDriveCredentials
-                  ? "Add your Google API credentials to enable Google Drive storage."
-                  : "Connect Google Drive to start uploading prompts, scripts, and links."}
-              </div>
-            )}
-            {usingLocal && (
-              <div className="mt-4 rounded-2xl border border-[#3fb950]/40 bg-[#238636]/15 p-4 text-sm text-[#b8ffc7]">
-                Items you upload are saved in this browser only. Use the same device to keep your vault, or switch back to Google
-                Drive mode to sync across accounts.
-              </div>
-            )}
-
-            <div className="mt-6 grid gap-6 lg:grid-cols-[1.6fr,1fr]">
-              <div className="space-y-6">
-                <div className="flex flex-wrap items-center gap-3">
-                  {categories.map((category) => (
-                    <button
-                      key={category.id}
-                      onClick={() => setActiveTab(category.id)}
-                      className={`rounded-full px-4 py-2 text-sm font-medium transition ${
-                        activeTab === category.id ? "bg-white/10 text-white" : "bg-white/5 text-slate-400 hover:bg-white/10"
-                      }`}
-                    >
-                      {category.label}
-                    </button>
-                  ))}
-                </div>
-
-                {activeTab === "prompts" && (
-                  <form onSubmit={handleAddPrompt} className="rounded-2xl border border-white/5 bg-white/5 p-5 space-y-4">
-                    <div className="flex items-center gap-3 text-sm text-slate-300">
-                      <UploadCloud className="h-5 w-5 text-[#3fb950]" /> Store a new prompt
-                    </div>
-                    <div>
-                      <label className="text-xs uppercase tracking-wide text-slate-400">Name</label>
-                      <Input name="name" placeholder="Prompt title" className="mt-1 border-white/10 bg-black/40 text-white" required />
-                    </div>
-                    <div>
-                      <label className="text-xs uppercase tracking-wide text-slate-400">Description</label>
-                      <Textarea name="description" placeholder="Short summary" className="mt-1 min-h-[80px] border-white/10 bg-black/40 text-white" />
-                    </div>
-                    <div>
-                      <label className="text-xs uppercase tracking-wide text-slate-400">Notes</label>
-                      <Textarea name="notes" placeholder="Paste the full prompt or any reminders" className="mt-1 min-h-[120px] border-white/10 bg-black/40 text-white" />
-                    </div>
-                    <Button
-                      type="submit"
-                      disabled={!storageReadyForActions || isBusy}
-                      className="bg-[#238636] text-white hover:bg-[#2ea043] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
-                    >
-                      Save prompt
-                    </Button>
-                  </form>
-                )}
-
-                {activeTab === "scripts" && (
-                  <form onSubmit={handleAddScript} className="rounded-2xl border border-white/5 bg-white/5 p-5 space-y-4">
-                    <div className="flex items-center gap-3 text-sm text-slate-300">
-                      <UploadCloud className="h-5 w-5 text-[#58a6ff]" /> Upload automation scripts
-                    </div>
-                    <div className="flex gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setScriptMode("file")}
-                        className={`flex-1 rounded-xl border px-4 py-2 text-sm transition ${
-                          scriptMode === "file" ? "border-[#1f6feb] bg-[#1f6feb]/20 text-[#58a6ff]" : "border-white/10 bg-black/30 text-slate-300 hover:border-white/20"
-                        }`}
-                      >
-                        Single file
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setScriptMode("folder")}
-                        className={`flex-1 rounded-xl border px-4 py-2 text-sm transition ${
-                          scriptMode === "folder" ? "border-[#1f6feb] bg-[#1f6feb]/20 text-[#58a6ff]" : "border-white/10 bg-black/30 text-slate-300 hover:border-white/20"
-                        }`}
-                      >
-                        Full folder
-                      </button>
-                    </div>
-                    <div>
-                      <label className="text-xs uppercase tracking-wide text-slate-400">Name</label>
-                      <Input name="name" placeholder="Display name" className="mt-1 border-white/10 bg-black/40 text-white" />
-                    </div>
-                    {scriptMode === "file" ? (
-                      <div>
-                        <label className="text-xs uppercase tracking-wide text-slate-400">Choose file</label>
-                        <Input
-                          type="file"
-                          disabled={!storageReadyForActions || isBusy}
-                          onChange={(event) => setScriptFiles(Array.from(event.target.files || []))}
-                          className="mt-1 border-white/10 bg-black/40 text-white file:mr-3 file:rounded-lg file:border-0 file:bg-[#1f6feb] file:px-4 file:py-2 file:text-sm file:text-white disabled:cursor-not-allowed"
-                        />
-                        {scriptFiles.length > 0 && (
-                          <p className="mt-2 text-xs text-slate-400">Selected: {scriptFiles[0].name}</p>
-                        )}
-                      </div>
-                    ) : (
-                      <div>
-                        <label className="text-xs uppercase tracking-wide text-slate-400">Select folder</label>
-                        <Input
-                          ref={folderInputRef}
-                          type="file"
-                          multiple
-                          disabled={!storageReadyForActions || isBusy}
-                          onChange={(event) => setScriptFolderFiles(Array.from(event.target.files || []))}
-                          className="mt-1 border-white/10 bg-black/40 text-white file:mr-3 file:rounded-lg file:border-0 file:bg-[#1f6feb] file:px-4 file:py-2 file:text-sm file:text-white disabled:cursor-not-allowed"
-                        />
-                        {scriptFolderFiles.length > 0 && (
-                          <p className="mt-2 text-xs text-slate-400">{scriptFolderFiles.length} items ready to upload</p>
-                        )}
-                      </div>
-                    )}
-                    <div>
-                      <label className="text-xs uppercase tracking-wide text-slate-400">Notes</label>
-                      <Textarea name="notes" placeholder="Context, setup steps, secrets, etc." className="mt-1 min-h-[120px] border-white/10 bg-black/40 text-white" />
-                    </div>
-                    <Button
-                      type="submit"
-                      disabled={!storageReadyForActions || isBusy}
-                      className="bg-[#1f6feb] text-white hover:bg-[#388bfd] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
-                    >
-                      Upload
-                    </Button>
-                  </form>
-                )}
-
-                {activeTab === "links" && (
-                  <form onSubmit={handleAddLink} className="rounded-2xl border border-white/5 bg-white/5 p-5 space-y-4">
-                    <div className="flex items-center gap-3 text-sm text-slate-300">
-                      <UploadCloud className="h-5 w-5 text-[#bf3989]" /> Save a research link
-                    </div>
-                    <div>
-                      <label className="text-xs uppercase tracking-wide text-slate-400">Name</label>
-                      <Input name="name" placeholder="Resource name" className="mt-1 border-white/10 bg-black/40 text-white" required />
-                    </div>
-                    <div>
-                      <label className="text-xs uppercase tracking-wide text-slate-400">URL</label>
-                      <Input name="url" type="url" placeholder="https://" className="mt-1 border-white/10 bg-black/40 text-white" required />
-                    </div>
-                    <div>
-                      <label className="text-xs uppercase tracking-wide text-slate-400">Notes</label>
-                      <Textarea name="notes" placeholder="Why this link matters" className="mt-1 min-h-[120px] border-white/10 bg-black/40 text-white" />
-                    </div>
-                    <Button
-                      type="submit"
-                      disabled={!storageReadyForActions || isBusy}
-                      className="bg-[#bf3989] text-white hover:bg-[#f778ba] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
-                    >
-                      Save link
-                    </Button>
-                  </form>
-                )}
-
+          <div className="space-y-6">
+            <Card className="border-white/10 bg-white/5 text-white">
+              <CardHeader>
+                <CardTitle className="text-white">Scripts</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <ScriptBreadcrumb breadcrumbs={scriptBreadcrumbs} onNavigate={setCurrentScriptFolderId} />
                 <div className="space-y-3">
-                  {activeTab === "prompts" &&
-                    (prompts.length ? (
-                      prompts.slice().reverse().map((prompt) => renderListItem("prompts", prompt))
-                    ) : (
-                      <EmptyState icon={FileText} title="No prompts yet" description="Upload your go-to prompt templates to access them quickly across projects." />
-                    ))}
-                  {activeTab === "scripts" &&
-                    (scriptsInView.length ? (
-                      <>
-                        <ScriptBreadcrumb breadcrumbs={scriptBreadcrumbs} onNavigate={setCurrentScriptFolderId} />
-                        {scriptsInView.map((script) => renderListItem("scripts", script))}
-                      </>
-                    ) : (
-                      <EmptyState icon={Folder} title="This folder is empty" description="Drag in a folder or upload a script file to start building your automation library." />
-                    ))}
-                  {activeTab === "links" &&
-                    (links.length ? (
-                      links.slice().reverse().map((link) => renderListItem("links", link))
-                    ) : (
-                      <EmptyState icon={Link2} title="No links saved" description="Collect tutorials, documentation, and reference URLs so your whole team stays aligned." />
-                    ))}
+                  {scriptsInView.length ? (
+                    scriptsInView.map((script) => renderListItem("scripts", script))
+                  ) : (
+                    <EmptyState
+                      icon={Folder}
+                      title="This folder is empty"
+                      description="Drag in a folder or upload a script file to start building your automation library."
+                    />
+                  )}
                 </div>
-              </div>
+              </CardContent>
+            </Card>
 
-              <div className="space-y-6">
-                {renderPreview()}
-              </div>
-            </div>
+            {renderPreview()}
           </div>
-        </>
-      )}
+        </div>
+      </div>
     </div>
   );
 
@@ -2929,8 +1924,14 @@ export default function App() {
           </div>
         </div>
       )}
-      <div className="mx-auto max-w-6xl px-6 py-10 space-y-10">
-        {renderDashboard()}
+      <div className="mx-auto max-w-6xl space-y-10 px-6 py-10">
+        {activeView === "admin" ? (adminOnly ? renderAdminPanel() : (
+          <div className="rounded-2xl border border-rose-500/40 bg-rose-500/10 p-4 text-sm text-rose-100">
+            You need administrator rights to manage access. Ask an admin to promote your account.
+          </div>
+        )) : (
+          renderDashboard()
+        )}
       </div>
       {renderContextMenu()}
       {renderEditDrawer()}
