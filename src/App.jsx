@@ -13,6 +13,7 @@ import {
   Users,
   ShieldCheck,
   LogOut,
+  ArrowLeft,
   ChevronRight,
   UploadCloud,
   MoreHorizontal,
@@ -54,12 +55,41 @@ const categories = [
   { id: "links", label: "Links", icon: Link2, accent: "from-[#bf3989] to-[#f778ba]" },
 ];
 
+const DEFAULT_SUPABASE_PROJECT_REF = "cauostpphtbzfyejffhk";
+const DEFAULT_SUPABASE_URL = `https://${DEFAULT_SUPABASE_PROJECT_REF}.supabase.co`;
+const DEFAULT_SUPABASE_ANON_KEY =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNhdW9zdHBwaHRiemZ5ZWpmZmhrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk5NjAyMjQsImV4cCI6MjA3NTUzNjIyNH0.JTucDx5zwBf2tk8LndLumLXInKc5BFDhvjxO9fZd7kI";
+
 const resolveEnv = (value, fallback = "") =>
   typeof value === "string" && value.trim().length > 0 ? value.trim() : fallback;
 
-const SUPABASE_URL = resolveEnv(import.meta.env.VITE_SUPABASE_URL);
-const SUPABASE_ANON_KEY = resolveEnv(import.meta.env.VITE_SUPABASE_ANON_KEY);
-const SUPABASE_REST_URL = SUPABASE_URL ? `${SUPABASE_URL.replace(/\/$/, "")}/rest/v1` : "";
+const normaliseSupabaseUrl = (value, fallback = "") => {
+  const trimmed = resolveEnv(value, fallback);
+  if (!trimmed) {
+    return "";
+  }
+  const sanitized = trimmed.replace(/\/$/, "");
+  const dashboardMatch = sanitized.match(/supabase\.com\/dashboard\/project\/([a-z0-9-]+)/i);
+  if (dashboardMatch) {
+    return `https://${dashboardMatch[1]}.supabase.co`;
+  }
+  if (/^[a-z0-9-]+$/i.test(sanitized) && !sanitized.includes(".")) {
+    return `https://${sanitized}.supabase.co`;
+  }
+  return sanitized;
+};
+
+const SUPABASE_URL = normaliseSupabaseUrl(
+  import.meta.env.VITE_SUPABASE_URL,
+  DEFAULT_SUPABASE_URL
+);
+const SUPABASE_ANON_KEY = resolveEnv(
+  import.meta.env.VITE_SUPABASE_ANON_KEY ?? import.meta.env.VITE_SUPABASE_KEY,
+  DEFAULT_SUPABASE_ANON_KEY
+);
+const SUPABASE_REST_URL = SUPABASE_URL
+  ? `${SUPABASE_URL.replace(/\/$/, "")}/rest/v1`
+  : "";
 
 async function supabaseRequest(path, { method = "GET", headers = {}, body, signal } = {}) {
   if (!SUPABASE_REST_URL) {
@@ -344,7 +374,7 @@ function ensureAdmins(list) {
 
 export default function App() {
   const isDraftMode = import.meta.env.MODE === "draft";
-  const supabaseReady = Boolean(SUPABASE_REST_URL);
+  const supabaseReady = Boolean(SUPABASE_REST_URL && SUPABASE_ANON_KEY);
 
   const [allowedEmails, setAllowedEmails] = useState(() => {
     if (typeof window === "undefined") {
@@ -1311,7 +1341,7 @@ export default function App() {
               <Input
                 name="name"
                 defaultValue={item.name}
-                className="mt-2 border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+                className="mt-2"
               />
             </div>
             {category === "prompts" && (
@@ -1320,7 +1350,7 @@ export default function App() {
                 <Textarea
                   name="description"
                   defaultValue={item.description}
-                  className="mt-2 min-h-[100px] border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+                  className="mt-2 min-h-[100px]"
                 />
               </div>
             )}
@@ -1330,7 +1360,7 @@ export default function App() {
                 <Input
                   name="url"
                   defaultValue={item.url}
-                  className="mt-2 border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+                  className="mt-2"
                 />
               </div>
             )}
@@ -1339,7 +1369,7 @@ export default function App() {
               <Textarea
                 name="notes"
                 defaultValue={item.notes}
-                className="mt-2 min-h-[120px] border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+                className="mt-2 min-h-[120px]"
               />
             </div>
             <div className="flex justify-end gap-3">
@@ -1455,7 +1485,7 @@ export default function App() {
                   <Input
                     name="name"
                     placeholder="How should we call you?"
-                    className="mt-1 border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+                    className="mt-1"
                   />
                 </div>
               )}
@@ -1465,7 +1495,7 @@ export default function App() {
                   name="email"
                   type="email"
                   placeholder="you@example.com"
-                  className="mt-1 border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+                  className="mt-1"
                   required
                 />
               </div>
@@ -1475,7 +1505,7 @@ export default function App() {
                   name="password"
                   type="password"
                   placeholder="••••••••"
-                  className="mt-1 border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+                  className="mt-1"
                   required
                 />
               </div>
@@ -1509,9 +1539,18 @@ export default function App() {
             Manage who can register, review members, and keep your workspace secure.
           </p>
         </div>
-        <Badge className="bg-[#238636]/20 text-[#3fb950]">
-          <ShieldCheck className="mr-2 h-4 w-4" /> Administrator
-        </Badge>
+        <div className="flex flex-wrap items-center gap-3">
+          <Badge className="bg-[#238636]/20 text-[#3fb950]">
+            <ShieldCheck className="mr-2 h-4 w-4" /> Administrator
+          </Badge>
+          <Button
+            variant="outline"
+            className="border-[#30363d] bg-[#161b22] text-[#c9d1d9] hover:bg-[#1f6feb]/20"
+            onClick={() => setActiveView("dashboard")}
+          >
+            <ArrowLeft className="mr-2 h-4 w-4" /> Back to dashboard
+          </Button>
+        </div>
       </div>
       <div className="grid gap-6 lg:grid-cols-2">
         <Card className="border-white/10 bg-[#0d1117] text-white">
@@ -1536,7 +1575,7 @@ export default function App() {
                 name="email"
                 type="email"
                 placeholder="new.teammate@example.com"
-                className="flex-1 border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+                className="flex-1"
                 required
               />
               <Button type="submit" className="bg-[#1f6feb] text-white hover:bg-[#388bfd]">
@@ -1733,18 +1772,17 @@ export default function App() {
                         <Input
                           name="name"
                           placeholder="Prompt title"
-                          className="border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
                           required
                         />
                         <Textarea
                           name="description"
                           placeholder="Short summary"
-                          className="min-h-[80px] border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+                          className="min-h-[80px]"
                         />
                         <Textarea
                           name="notes"
                           placeholder="Paste the full prompt or any reminders"
-                          className="min-h-[120px] border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+                          className="min-h-[120px]"
                         />
                         <Button
                           type="submit"
@@ -1765,13 +1803,12 @@ export default function App() {
                         <Input
                           name="name"
                           placeholder={scriptMode === "file" ? "Display name" : "Folder name"}
-                          className="border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
                         />
                         {scriptMode === "file" ? (
                           <Input
                             type="file"
                             onChange={(event) => setScriptFiles(Array.from(event.target.files || []))}
-                            className="border border-white/10 bg-white/10 text-white file:mr-3 file:rounded-lg file:border-0 file:bg-[#1f6feb] file:px-4 file:py-2 file:text-sm file:text-white"
+                            className="file:mr-3 file:rounded-lg file:border-0 file:bg-[#1f6feb] file:px-4 file:py-2 file:text-sm file:text-white"
                             required
                           />
                         ) : (
@@ -1781,7 +1818,7 @@ export default function App() {
                               type="file"
                               multiple
                               onChange={(event) => setScriptFolderFiles(Array.from(event.target.files || []))}
-                              className="border border-white/10 bg-white/10 text-white file:mr-3 file:rounded-lg file:border-0 file:bg-[#1f6feb] file:px-4 file:py-2 file:text-sm file:text-white"
+                              className="file:mr-3 file:rounded-lg file:border-0 file:bg-[#1f6feb] file:px-4 file:py-2 file:text-sm file:text-white"
                               required
                             />
                             {scriptFolderFiles.length > 0 && (
@@ -1792,7 +1829,7 @@ export default function App() {
                         <Textarea
                           name="notes"
                           placeholder="Context, setup steps, secrets, etc."
-                          className="min-h-[120px] border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+                          className="min-h-[120px]"
                         />
                         <Button
                           type="submit"
@@ -1813,20 +1850,18 @@ export default function App() {
                         <Input
                           name="name"
                           placeholder="Resource name"
-                          className="border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
                           required
                         />
                         <Input
                           name="url"
                           type="url"
                           placeholder="https://"
-                          className="border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
                           required
                         />
                         <Textarea
                           name="notes"
                           placeholder="Why this link matters"
-                          className="min-h-[120px] border border-white/10 bg-white/10 text-white placeholder:text-slate-300"
+                          className="min-h-[120px]"
                         />
                         <Button
                           type="submit"

@@ -13,11 +13,13 @@ Then open the URL printed by Vite (usually http://localhost:5173).
 
 ### Required environment variables
 
-Create a `.env.local` file in the project root with your Supabase credentials before starting the dev server:
+The repo ships with ready-to-use Supabase credentials so you can explore immediately. If you want to point the app at your own project, create a `.env.local` file in the project root before starting the dev server:
 
 ```
-VITE_SUPABASE_URL=your-project-url
-VITE_SUPABASE_ANON_KEY=your-public-anon-key
+VITE_SUPABASE_URL=https://your-project.supabase.co
+VITE_SUPABASE_KEY=your-public-anon-key
+# Optional legacy name also supported:
+# VITE_SUPABASE_ANON_KEY=your-public-anon-key
 ```
 
 See [Supabase storage setup](#supabase-storage-setup-free-tier) for table definitions and a full walkthrough.
@@ -91,14 +93,19 @@ VaultHub now uses [Supabase](https://supabase.com) as its zero-cost cloud vault.
 
    The app stores script files and folders in this table. Files are base64 encoded and remain lightweight enough for Supabase's free limits.
 3. Open **Project Settings → API** and copy the **Project URL** and **anon public key**.
-4. Create a `.env.local` file with those values so the front-end can talk to your project:
+4. Create a `.env.local` file with those values so the front-end can talk to your project. You can paste the API URL, the dashboard URL, or just the project ref — the app normalises each format automatically:
 
    ```bash
    VITE_SUPABASE_URL=https://your-project.supabase.co
-   VITE_SUPABASE_ANON_KEY=your-public-anon-key
+   VITE_SUPABASE_KEY=your-public-anon-key
+   # Optional legacy name also supported:
+   # VITE_SUPABASE_ANON_KEY=your-public-anon-key
    ```
 
 5. Restart the dev server. The dashboard will show a “Connected to Supabase” badge once the credentials are valid. Bulk downloads, context menus, and folder uploads all operate directly against your Supabase tables.
+
+The default Playmax build points at the shared project `cauostpphtbzfyejffhk` using the anon key
+`eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNhdW9zdHBwaHRiemZ5ZWpmZmhrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk5NjAyMjQsImV4cCI6MjA3NTUzNjIyNH0.JTucDx5zwBf2tk8LndLumLXInKc5BFDhvjxO9fZd7kI`, so you can run the app without creating your own Supabase account if you just want to test uploads and downloads.
 
 Because the anon key is public, every request stays client-side and there is no additional server to maintain. Restrict insert/update/delete access with Supabase Row Level Security if you intend to expose the vault broadly.
 
