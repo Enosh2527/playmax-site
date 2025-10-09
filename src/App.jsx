@@ -65,6 +65,7 @@ const DRIVE_SCOPES =
   "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.metadata.readonly";
 const DRIVE_FOLDER_NAME = "VaultHub Workspace";
 const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
+const WORKSPACE_VERSION = "2";
 
 const textEncoder = new TextEncoder();
 
@@ -119,6 +120,9 @@ function normaliseDriveError(error) {
     combinedText.includes("has not been used in project")
   ) {
     hint = "Turn on the Google Drive API for this project in Google Cloud console, then try again.";
+  } else if (reason === "invalid" || combinedText.includes("invalid value")) {
+    hint =
+      "Google rejected one of the Drive folders the workspace references. Click “Refresh Drive” to let VaultHub rebuild its Drive structure, or delete the existing “VaultHub Workspace” folder in Drive before reconnecting.";
   } else if (combinedText.includes("invalid grant")) {
     hint =
       "The Drive token expired or was revoked. Click \"Connect Google Drive\" again or remove VaultHub from https://myaccount.google.com/permissions before retrying.";
@@ -541,14 +545,38 @@ export default function App() {
   const findFolderByProperty = useCallback(
     async (key, value) => {
       await ensureDriveToken();
-      const query = `trashed=false and mimeType='${FOLDER_MIME_TYPE}' and appProperties has { key='${key}', value='${value}' }`;
+      const query = [
+        "trashed=false",
+        `mimeType='${FOLDER_MIME_TYPE}'`,
+        `appProperties has { key='${key}', value='${value}' }`,
+      ].join(" and ");
       const response = await window.gapi.client.drive.files.list({
         q: query,
         fields: "files(id,name,appProperties,parents)",
-        pageSize: 1,
+        pageSize: 10,
+        orderBy: "createdTime desc",
       });
       const files = response.result.files || [];
-      return files[0] ?? null;
+      for (const file of files) {
+        try {
+          await window.gapi.client.drive.files.get({ fileId: file.id, fields: "id" });
+          return file;
+        } catch (error) {
+          const info = normaliseDriveError(error);
+          const message = (info.message || "").toLowerCase();
+          if (
+            info.reason === "invalid" ||
+            info.code === 400 ||
+            info.status === "INVALID_ARGUMENT" ||
+            info.code === 404 ||
+            message.includes("invalid value")
+          ) {
+            continue;
+          }
+          throw error;
+        }
+      }
+      return null;
     },
     [ensureDriveToken]
   );
@@ -571,42 +599,150 @@ export default function App() {
   );
 
   const ensureWorkspaceStructure = useCallback(async () => {
-    let root = await findFolderByProperty("vaultHubRoot", "true");
-    if (!root) {
-      root = await createDriveFolder(DRIVE_FOLDER_NAME, null, { vaultHubRoot: "true" });
-    }
-
-    const ensureCategoryFolder = async (category, defaultName) => {
-      const query =
-        `trashed=false and mimeType='${FOLDER_MIME_TYPE}' and appProperties has { key='vaultHubCategory', value='${category}' } and '${root.id}' in parents`;
-      const response = await window.gapi.client.drive.files.list({
-        q: query,
-        fields: "files(id,name,appProperties,parents)",
-        pageSize: 1,
-      });
-      let folder = response.result.files?.[0];
-      if (!folder) {
-        folder = await createDriveFolder(defaultName, root.id, {
-          vaultHubCategory: category,
+    const buildWorkspace = async (forceNewRoot = false) => {
+      let root = null;
+      if (!forceNewRoot) {
+        root =
+          (await findFolderByProperty("vaultHubWorkspaceVersion", WORKSPACE_VERSION)) ||
+          (await findFolderByProperty("vaultHubRoot", "true"));
+      }
+      if (root && root.appProperties?.vaultHubWorkspaceVersion !== WORKSPACE_VERSION) {
+        try {
+          await window.gapi.client.drive.files.update({
+            fileId: root.id,
+            resource: {
+              appProperties: {
+                ...(root.appProperties || {}),
+                vaultHub: "true",
+                vaultHubRoot: "true",
+                vaultHubWorkspaceVersion: WORKSPACE_VERSION,
+              },
+            },
+            fields: "id,appProperties",
+          });
+          root.appProperties = {
+            ...(root.appProperties || {}),
+            vaultHub: "true",
+            vaultHubRoot: "true",
+            vaultHubWorkspaceVersion: WORKSPACE_VERSION,
+          };
+        } catch (error) {
+          const info = normaliseDriveError(error);
+          const message = (info.message || "").toLowerCase();
+          if (
+            info.reason === "invalid" ||
+            info.code === 400 ||
+            info.status === "INVALID_ARGUMENT" ||
+            info.code === 404 ||
+            message.includes("invalid value")
+          ) {
+            root = null;
+          } else {
+            throw error;
+          }
+        }
+      }
+      if (!root) {
+        root = await createDriveFolder(DRIVE_FOLDER_NAME, null, {
+          vaultHub: "true",
+          vaultHubRoot: "true",
+          vaultHubWorkspaceVersion: WORKSPACE_VERSION,
         });
       }
-      return folder;
+
+      const ensureCategoryFolder = async (category, defaultName) => {
+        const query = [
+          "trashed=false",
+          `mimeType='${FOLDER_MIME_TYPE}'`,
+          `appProperties has { key='vaultHubCategory', value='${category}' }`,
+          `'${root.id}' in parents`,
+        ].join(" and ");
+        const response = await window.gapi.client.drive.files.list({
+          q: query,
+          fields: "files(id,name,appProperties,parents)",
+          pageSize: 1,
+        });
+        let folder = response.result.files?.[0];
+        if (!folder) {
+          folder = await createDriveFolder(defaultName, root.id, {
+            vaultHub: "true",
+            vaultHubCategory: category,
+            vaultHubWorkspaceVersion: WORKSPACE_VERSION,
+          });
+        } else if (folder.appProperties?.vaultHubWorkspaceVersion !== WORKSPACE_VERSION) {
+          try {
+            await window.gapi.client.drive.files.update({
+              fileId: folder.id,
+              resource: {
+                appProperties: {
+                  ...(folder.appProperties || {}),
+                  vaultHub: "true",
+                  vaultHubCategory: category,
+                  vaultHubWorkspaceVersion: WORKSPACE_VERSION,
+                },
+              },
+              fields: "id,appProperties",
+            });
+            folder.appProperties = {
+              ...(folder.appProperties || {}),
+              vaultHub: "true",
+              vaultHubCategory: category,
+              vaultHubWorkspaceVersion: WORKSPACE_VERSION,
+            };
+          } catch (error) {
+            const info = normaliseDriveError(error);
+            const message = (info.message || "").toLowerCase();
+            if (
+              info.reason === "invalid" ||
+              info.code === 400 ||
+              info.status === "INVALID_ARGUMENT" ||
+              info.code === 404 ||
+              message.includes("invalid value")
+            ) {
+              folder = await createDriveFolder(defaultName, root.id, {
+                vaultHub: "true",
+                vaultHubCategory: category,
+                vaultHubWorkspaceVersion: WORKSPACE_VERSION,
+              });
+            } else {
+              throw error;
+            }
+          }
+        }
+        return folder;
+      };
+
+      const promptsFolder = await ensureCategoryFolder("prompts", "Prompts");
+      const scriptsFolder = await ensureCategoryFolder("scripts", "Scripts");
+      const linksFolder = await ensureCategoryFolder("links", "Links");
+
+      const folders = {
+        rootId: root.id,
+        promptsId: promptsFolder.id,
+        scriptsId: scriptsFolder.id,
+        linksId: linksFolder.id,
+      };
+
+      driveFoldersRef.current = folders;
+      setDriveFolders(folders);
+      return folders;
     };
 
-    const promptsFolder = await ensureCategoryFolder("prompts", "Prompts");
-    const scriptsFolder = await ensureCategoryFolder("scripts", "Scripts");
-    const linksFolder = await ensureCategoryFolder("links", "Links");
-
-    const folders = {
-      rootId: root.id,
-      promptsId: promptsFolder.id,
-      scriptsId: scriptsFolder.id,
-      linksId: linksFolder.id,
-    };
-
-    driveFoldersRef.current = folders;
-    setDriveFolders(folders);
-    return folders;
+    try {
+      return await buildWorkspace(false);
+    } catch (error) {
+      const info = normaliseDriveError(error);
+      const message = (info.message || "").toLowerCase();
+      if (
+        info.reason === "invalid" ||
+        info.code === 400 ||
+        info.status === "INVALID_ARGUMENT" ||
+        message.includes("invalid value")
+      ) {
+        return await buildWorkspace(true);
+      }
+      throw error;
+    }
   }, [createDriveFolder, findFolderByProperty]);
 
   const listFolderContents = useCallback(

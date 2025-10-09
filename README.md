@@ -72,6 +72,7 @@ When Drive rejects a request, the dashboard now keeps the exact error text Googl
 - **`insufficientPermissions` / `PERMISSION_DENIED`** – enable the Google Drive API for your OAuth project and list the signing-in account as a test user on the consent screen.
 - **`accessNotConfigured` or messages about the API not being used before** – enable the Drive API in Google Cloud console and retry after a short delay.
 - **`invalid_grant`** – the Drive token has expired or was revoked. Click **Connect Google Drive** again or revoke the existing grant from [Google Account permissions](https://myaccount.google.com/permissions) before reconnecting.
+- **`invalid` / `Invalid Value`** – VaultHub detected a stale Drive folder reference. Press **Refresh Drive** so the app can recreate its `VaultHub Workspace` structure automatically. If the error persists, delete the `VaultHub Workspace` folder from Drive and reconnect.
 - **Rate limit errors** – wait a minute before syncing again; Google's throttling should clear automatically.
 
 Share the error card details if you ask for help—they match exactly what Google sent back.
