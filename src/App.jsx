@@ -53,8 +53,8 @@ const categories = [
 ];
 
 const DEFAULT_GOOGLE_CLIENT_ID =
-  "499680265383-348npmbkgdbe1jupokjab08k607pv3n2.apps.googleusercontent.com";
-const DEFAULT_GOOGLE_API_KEY = "AIzaSyA0NkBW6oeiQuVaoMzfLPJr2l3LNuCKwVQ";
+  "952287910237-kqtdm3ls26n054t3eoelmi901filbmj0.apps.googleusercontent.com";
+const DEFAULT_GOOGLE_API_KEY = "AIzaSyALZ-76IMlrMHlRv0oNurLBfmM_mK_R9Ac";
 
 const resolveEnv = (value, fallback) =>
   typeof value === "string" && value.trim().length > 0 ? value.trim() : fallback;

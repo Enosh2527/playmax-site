@@ -39,8 +39,8 @@ The app will be available on http://localhost:5173 with the draft ribbon display
 VaultHub persists prompts, scripts, and links to a dedicated folder in your Google Drive. The ready-to-use build already embeds production credentials so you can connect immediately:
 
 ```
-VITE_GOOGLE_CLIENT_ID=499680265383-348npmbkgdbe1jupokjab08k607pv3n2.apps.googleusercontent.com
-VITE_GOOGLE_API_KEY=AIzaSyA0NkBW6oeiQuVaoMzfLPJr2l3LNuCKwVQ
+VITE_GOOGLE_CLIENT_ID=952287910237-kqtdm3ls26n054t3eoelmi901filbmj0.apps.googleusercontent.com
+VITE_GOOGLE_API_KEY=AIzaSyALZ-76IMlrMHlRv0oNurLBfmM_mK_R9Ac
 ```
 
 If you'd like to supply your own keys instead, follow these steps before running the project locally:
@@ -60,6 +60,18 @@ If you'd like to supply your own keys instead, follow these steps before running
    ```
 
 6. Restart the dev server (`npm run dev`). Once you log in to the dashboard, click **Connect Google Drive** to authorize the app. A folder named **VaultHub Workspace** will be created automatically with Prompts, Scripts, and Links subfolders for storing your uploads.
+
+## Ready-to-use verification build
+
+If you want to test the production bundle (the same one you would deploy), build and run the preview server locally. This serves the optimized assets and is the best way to validate upload, download, and admin flows end to end.
+
+```bash
+npm install
+npm run build
+npm run preview
+```
+
+Visit the printed URL (default `http://localhost:4173`) to exercise the full experience against Google Drive using the bundled credentials.
 
 ## Build
 
