@@ -1,9 +1,13 @@
-import React from 'react';
-export function Card({ className = '', children }) {
-  return <div className={`bg-white border ${className}`}>{children}</div>;
+import React from "react";
+
+const baseCard = "rounded-2xl border border-[#30363d] bg-[#0d1117] text-[#c9d1d9]";
+const headerBase = "border-b border-[#30363d] p-6";
+
+export function Card({ className = "", children }) {
+  return <div className={`${baseCard} ${className}`}>{children}</div>;
 }
 export function CardHeader({ className = '', children }) {
-  return <div className={`p-6 border-b ${className}`}>{children}</div>;
+  return <div className={`${headerBase} ${className}`}>{children}</div>;
 }
 export function CardTitle({ className = '', children }) {
   return <h3 className={`text-lg font-semibold ${className}`}>{children}</h3>;

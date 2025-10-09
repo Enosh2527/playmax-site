@@ -38,3 +38,39 @@ button {
 .card-border {
   border: 1px solid rgba(240, 246, 252, 0.08);
 }
+
+.bg-white\/5 {
+  background-color: rgba(13, 17, 23, 0.75) !important;
+}
+
+.bg-white\/10 {
+  background-color: rgba(22, 27, 34, 0.85) !important;
+}
+
+.bg-white\/20 {
+  background-color: rgba(33, 38, 45, 0.9) !important;
+}
+
+.hover\:bg-white\/5:hover {
+  background-color: rgba(22, 27, 34, 0.75) !important;
+}
+
+.hover\:bg-white\/10:hover {
+  background-color: rgba(33, 38, 45, 0.8) !important;
+}
+
+.hover\:bg-white\/20:hover {
+  background-color: rgba(46, 52, 64, 0.85) !important;
+}
+
+.border-white\/5 {
+  border-color: rgba(48, 54, 61, 0.9) !important;
+}
+
+.border-white\/10 {
+  border-color: rgba(48, 54, 61, 0.7) !important;
+}
+
+.border-white\/20 {
+  border-color: rgba(75, 82, 92, 0.75) !important;
+}

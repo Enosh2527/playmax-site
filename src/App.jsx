@@ -326,40 +326,201 @@ function EmptyState({ icon: Icon, title, description }) {
 const ALLOWED_EMAILS_KEY = "vaulthub-allowed-emails";
 const USERS_KEY = "vaulthub-users";
 
-const mapPromptRow = (row) => ({
-  id: row.id,
-  name: row.name,
-  description: row.description ?? "",
-  notes: row.notes ?? "",
-  uploader: row.uploader ?? "Unknown",
-  uploaderEmail: row.uploader_email ?? "",
-  createdAt: row.created_at ?? new Date().toISOString(),
+const defaultSupabaseSchema = {
+  allowed_emails: {
+    table: "allowed_emails",
+    columns: {
+      email: "email",
+      role: "role",
+      created_at: "created_at",
+    },
+  },
+  prompts: {
+    table: "prompts",
+    columns: {
+      id: "id",
+      name: "name",
+      description: "description",
+      notes: "notes",
+      uploader: "uploader",
+      uploader_email: "uploader_email",
+      created_at: "created_at",
+    },
+  },
+  links: {
+    table: "links",
+    columns: {
+      id: "id",
+      name: "name",
+      url: "url",
+      notes: "notes",
+      uploader: "uploader",
+      uploader_email: "uploader_email",
+      created_at: "created_at",
+    },
+  },
+  scripts: {
+    table: "scripts",
+    columns: {
+      id: "id",
+      type: "type",
+      name: "name",
+      original_name: "original_name",
+      notes: "notes",
+      uploader: "uploader",
+      uploader_email: "uploader_email",
+      created_at: "created_at",
+      parent_id: "parent_id",
+      file_mime: "file_mime",
+      file_size: "file_size",
+      file_content: "file_content",
+    },
+  },
+};
+
+const columnSynonyms = {
+  email: ["email_address", "user_email"],
+  role: ["permission", "access_level"],
+  name: ["title", "label", "filename"],
+  description: ["details", "summary", "prompt_description"],
+  notes: ["note", "remarks", "info"],
+  uploader: ["uploaded_by", "author", "owner"],
+  uploader_email: ["uploaderEmail", "email", "owner_email"],
+  created_at: ["createdAt", "created_on", "timestamp"],
+  url: ["link", "href", "target"],
+  type: ["entry_type", "kind"],
+  original_name: ["originalName", "original", "source_name"],
+  parent_id: ["parent", "folder_id", "parentId"],
+  file_mime: ["mime", "mimetype", "content_type"],
+  file_size: ["size", "filesize", "content_length"],
+  file_content: ["content", "data", "payload"],
+};
+
+const optionalColumns = {
+  allowed_emails: new Set(["role", "created_at"]),
+  prompts: new Set(["description", "notes"]),
+  links: new Set(["notes"]),
+  scripts: new Set(["notes", "original_name", "parent_id", "file_mime", "file_size", "file_content"]),
+};
+
+const shapeSupabasePayload = (tableSchema, canonical) => {
+  const result = {};
+  if (!tableSchema || !tableSchema.columns) {
+    return { ...canonical };
+  }
+  for (const [logical, value] of Object.entries(canonical)) {
+    const column = tableSchema.columns[logical];
+    if (!column) continue;
+    if (value === undefined) continue;
+    result[column] = value;
+  }
+  return result;
+};
+
+const buildFilterPath = (tableSchema, columnKey, value) => {
+  if (!tableSchema || !tableSchema.columns?.[columnKey]) {
+    return `${tableSchema?.table ?? columnKey}?${columnKey}=eq.${encodeURIComponent(value)}`;
+  }
+  const column = tableSchema.columns[columnKey];
+  return `${tableSchema.table}?${encodeURIComponent(column)}=eq.${encodeURIComponent(value)}`;
+};
+
+const getColumnName = (row, column) => {
+  if (!column) return undefined;
+  return row?.[column];
+};
+
+const mapPromptRow = (row, columns = defaultSupabaseSchema.prompts.columns) => ({
+  id: getColumnName(row, columns.id),
+  name: getColumnName(row, columns.name),
+  description: getColumnName(row, columns.description) ?? "",
+  notes: getColumnName(row, columns.notes) ?? "",
+  uploader: getColumnName(row, columns.uploader) ?? "Unknown",
+  uploaderEmail: getColumnName(row, columns.uploader_email) ?? "",
+  createdAt: getColumnName(row, columns.created_at) ?? new Date().toISOString(),
 });
 
-const mapLinkRow = (row) => ({
-  id: row.id,
-  name: row.name,
-  url: row.url,
-  notes: row.notes ?? "",
-  uploader: row.uploader ?? "Unknown",
-  uploaderEmail: row.uploader_email ?? "",
-  createdAt: row.created_at ?? new Date().toISOString(),
+const mapLinkRow = (row, columns = defaultSupabaseSchema.links.columns) => ({
+  id: getColumnName(row, columns.id),
+  name: getColumnName(row, columns.name),
+  url: getColumnName(row, columns.url),
+  notes: getColumnName(row, columns.notes) ?? "",
+  uploader: getColumnName(row, columns.uploader) ?? "Unknown",
+  uploaderEmail: getColumnName(row, columns.uploader_email) ?? "",
+  createdAt: getColumnName(row, columns.created_at) ?? new Date().toISOString(),
 });
 
-const mapScriptRow = (row) => ({
-  id: row.id,
-  type: row.type,
-  name: row.name,
-  notes: row.notes ?? "",
-  uploader: row.uploader ?? "Unknown",
-  uploaderEmail: row.uploader_email ?? "",
-  createdAt: row.created_at ?? new Date().toISOString(),
-  parentId: row.parent_id ?? null,
-  mimeType: row.file_mime ?? (row.type === "folder" ? "" : "application/octet-stream"),
-  size: Number(row.file_size ?? 0),
-  originalName: row.original_name ?? row.name,
-  content: row.file_content ?? null,
+const mapScriptRow = (row, columns = defaultSupabaseSchema.scripts.columns) => ({
+  id: getColumnName(row, columns.id),
+  type: getColumnName(row, columns.type),
+  name: getColumnName(row, columns.name),
+  notes: getColumnName(row, columns.notes) ?? "",
+  uploader: getColumnName(row, columns.uploader) ?? "Unknown",
+  uploaderEmail: getColumnName(row, columns.uploader_email) ?? "",
+  createdAt: getColumnName(row, columns.created_at) ?? new Date().toISOString(),
+  parentId: getColumnName(row, columns.parent_id) ?? null,
+  mimeType:
+    getColumnName(row, columns.file_mime) ??
+    (getColumnName(row, columns.type) === "folder" ? "" : "application/octet-stream"),
+  size: Number(getColumnName(row, columns.file_size) ?? 0),
+  originalName: getColumnName(row, columns.original_name) ?? getColumnName(row, columns.name),
+  content: getColumnName(row, columns.file_content) ?? null,
 });
+
+const buildSupabaseSchemaMapping = (rows = []) => {
+  const byTable = new Map();
+  for (const entry of rows) {
+    const tableName = String(entry.table_name || "").toLowerCase();
+    const columnName = String(entry.column_name || "");
+    if (!tableName || !columnName) continue;
+    if (!byTable.has(tableName)) {
+      byTable.set(tableName, []);
+    }
+    byTable.get(tableName).push(columnName);
+  }
+
+  const mapping = {};
+  const missing = [];
+
+  for (const [table, config] of Object.entries(defaultSupabaseSchema)) {
+    const availableColumns = new Map();
+    for (const columnName of byTable.get(table) ?? []) {
+      availableColumns.set(columnName.toLowerCase(), columnName);
+    }
+
+    const resolvedColumns = {};
+    for (const [logicalKey, defaultColumn] of Object.entries(config.columns)) {
+      const synonyms = [defaultColumn, ...(columnSynonyms[logicalKey] ?? [])];
+      let resolved = null;
+      for (const synonym of synonyms) {
+        const candidate = availableColumns.get(synonym.toLowerCase());
+        if (candidate) {
+          resolved = candidate;
+          break;
+        }
+      }
+
+      if (!resolved) {
+        const isOptional = optionalColumns[table]?.has(logicalKey);
+        if (!isOptional) {
+          missing.push({ table, column: defaultColumn });
+          resolvedColumns[logicalKey] = defaultColumn;
+        } else {
+          resolvedColumns[logicalKey] = null;
+        }
+      } else {
+        resolvedColumns[logicalKey] = resolved;
+      }
+    }
+
+    mapping[table] = {
+      ...config,
+      columns: resolvedColumns,
+    };
+  }
+
+  return { mapping, missing };
+};
 
 function ensureAdmins(list) {
   const byEmail = new Map(list.map((user) => [user.email.toLowerCase(), user]));
@@ -430,6 +591,10 @@ export default function App() {
   const [scripts, setScripts] = useState([]);
   const [links, setLinks] = useState([]);
 
+  const [supabaseSchema, setSupabaseSchema] = useState(defaultSupabaseSchema);
+  const [schemaReady, setSchemaReady] = useState(false);
+  const [schemaIssues, setSchemaIssues] = useState([]);
+
   const [vaultError, setVaultError] = useState(() =>
     supabaseReady ? "" : "Supabase credentials are missing. Update your environment variables to enable cloud storage."
   );
@@ -449,6 +614,23 @@ export default function App() {
 
   const folderInputRef = useRef(null);
   const contextMenuRef = useRef(null);
+
+  const storageReady = supabaseReady && schemaReady && schemaIssues.length === 0;
+  const connectionLabel = useMemo(() => {
+    if (!supabaseReady) return "Storage not configured";
+    if (schemaIssues.length) return "Schema mismatch";
+    if (!schemaReady) return "Checking schema…";
+    return "Connected to Supabase";
+  }, [schemaIssues.length, schemaReady, supabaseReady]);
+  const connectionClasses = useMemo(() => {
+    if (schemaIssues.length) {
+      return "border-amber-400/30 bg-amber-500/10 text-amber-100";
+    }
+    if (storageReady) {
+      return "border-[#58a6ff]/40 bg-[#0b2f53] text-[#9cc4ff]";
+    }
+    return "border-white/10 bg-[#161b22] text-slate-300";
+  }, [schemaIssues.length, storageReady]);
 
   useEffect(() => {
     if (scriptMode !== "folder") return;
@@ -473,8 +655,66 @@ export default function App() {
     window.localStorage.setItem(USERS_KEY, JSON.stringify(users));
   }, [users]);
 
-  const refreshWorkspace = useCallback(async () => {
+  useEffect(() => {
     if (!supabaseReady) {
+      setSchemaReady(false);
+      setSchemaIssues([]);
+      setSupabaseSchema(defaultSupabaseSchema);
+      return;
+    }
+
+    let cancelled = false;
+
+    const inspectSchema = async () => {
+      try {
+        setVaultStatus((status) => status || "Checking Supabase schema…");
+        const rows = await supabaseRequest(
+          "information_schema.columns?table_schema=eq.public&table_name=in.(prompts,links,scripts)&select=table_name,column_name",
+          {
+            headers: { Accept: "application/json" },
+          }
+        );
+        if (cancelled) return;
+        const { mapping, missing } = buildSupabaseSchemaMapping(rows ?? []);
+        setSupabaseSchema(mapping);
+        setSchemaIssues(missing);
+        setSchemaReady(missing.length === 0);
+        if (missing.length) {
+          setVaultError(
+            (prev) =>
+              prev && !prev.toLowerCase().includes("missing")
+                ? prev
+                : `Supabase table "${missing[0].table}" is missing the "${missing[0].column}" column. Run the SQL snippet in the README to finish your setup.`
+          );
+        } else {
+          setVaultError((prev) =>
+            prev && prev.startsWith("Supabase table") ? "" : prev
+          );
+        }
+      } catch (error) {
+        if (cancelled) return;
+        console.error("Failed to inspect Supabase schema", error);
+        setSchemaReady(false);
+        setSchemaIssues([{ table: "prompts", column: "name" }]);
+        setVaultError(
+          error.message || "Unable to inspect the Supabase schema. Check your project permissions."
+        );
+      } finally {
+        if (!cancelled) {
+          setVaultStatus((prev) => (prev === "Checking Supabase schema…" ? "" : prev));
+        }
+      }
+    };
+
+    inspectSchema();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [supabaseReady]);
+
+  const refreshWorkspace = useCallback(async () => {
+    if (!supabaseReady || !schemaReady) {
       return;
     }
     try {
@@ -482,15 +722,53 @@ export default function App() {
       setVaultStatus("Syncing workspace from Supabase…");
       setVaultError("");
 
-      const [promptsData, linksData, scriptsData] = await Promise.all([
-        supabaseRequest("prompts?select=*"),
-        supabaseRequest("links?select=*"),
-        supabaseRequest("scripts?select=*"),
+      const [allowedEmailRows, promptsData, linksData, scriptsData] = await Promise.all([
+        supabaseSchema.allowed_emails.columns.email
+          ? supabaseRequest(`${supabaseSchema.allowed_emails.table}?select=*`)
+          : Promise.resolve(null),
+        supabaseRequest(`${supabaseSchema.prompts.table}?select=*`),
+        supabaseRequest(`${supabaseSchema.links.table}?select=*`),
+        supabaseRequest(`${supabaseSchema.scripts.table}?select=*`),
       ]);
 
-      const promptEntries = (promptsData ?? []).map(mapPromptRow);
-      const linkEntries = (linksData ?? []).map(mapLinkRow);
-      const scriptEntries = (scriptsData ?? []).map(mapScriptRow);
+      if (Array.isArray(allowedEmailRows)) {
+        const emailColumn = supabaseSchema.allowed_emails.columns.email;
+        const fetched = allowedEmailRows
+          .map((row) => String(getColumnName(row, emailColumn) || "").trim().toLowerCase())
+          .filter(Boolean);
+        const missingDefaults = initialAllowedEmails.filter(
+          (email) => !fetched.includes(email)
+        );
+        if (missingDefaults.length) {
+          const seedRows = missingDefaults.map((email) =>
+            shapeSupabasePayload(supabaseSchema.allowed_emails, {
+              email,
+              role: protectedAdminEmails.has(email) ? "admin" : "member",
+              created_at: new Date().toISOString(),
+            })
+          );
+          await supabaseRequest(supabaseSchema.allowed_emails.table, {
+            method: "POST",
+            headers: { Prefer: "resolution=ignore-duplicates" },
+            body: JSON.stringify(seedRows),
+          });
+          fetched.push(...missingDefaults);
+        }
+        const unique = Array.from(new Set([...initialAllowedEmails, ...fetched])).sort((a, b) =>
+          a.localeCompare(b)
+        );
+        setAllowedEmails(unique);
+      }
+
+      const promptEntries = (promptsData ?? []).map((row) =>
+        mapPromptRow(row, supabaseSchema.prompts.columns)
+      );
+      const linkEntries = (linksData ?? []).map((row) =>
+        mapLinkRow(row, supabaseSchema.links.columns)
+      );
+      const scriptEntries = (scriptsData ?? []).map((row) =>
+        mapScriptRow(row, supabaseSchema.scripts.columns)
+      );
 
       promptEntries.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
       linkEntries.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
@@ -505,14 +783,14 @@ export default function App() {
       setWorkspaceLoading(false);
       setVaultStatus("");
     }
-  }, [supabaseReady]);
+  }, [schemaReady, supabaseReady, supabaseSchema]);
 
   useEffect(() => {
-    if (!supabaseReady) {
+    if (!supabaseReady || !schemaReady) {
       return;
     }
     refreshWorkspace();
-  }, [supabaseReady, refreshWorkspace]);
+  }, [schemaReady, supabaseReady, refreshWorkspace]);
 
   useEffect(() => {
     const handleClick = (event) => {
@@ -608,7 +886,7 @@ export default function App() {
 
   const handleAddPrompt = async (event) => {
     event.preventDefault();
-    if (!currentUser || !supabaseReady) return;
+    if (!currentUser || !storageReady) return;
     const form = new FormData(event.currentTarget);
     const name = String(form.get("name") || "").trim();
     const description = String(form.get("description") || "").trim();
@@ -626,12 +904,13 @@ export default function App() {
         uploader_email: currentUser.email,
         created_at: createdAt,
       };
-      const data = await supabaseRequest("prompts", {
+      const shapedPayload = shapeSupabasePayload(supabaseSchema.prompts, payload);
+      const data = await supabaseRequest(supabaseSchema.prompts.table, {
         method: "POST",
         headers: { Prefer: "return=representation" },
-        body: JSON.stringify([payload]),
+        body: JSON.stringify([shapedPayload]),
       });
-      const entry = mapPromptRow((data ?? [payload])[0]);
+      const entry = mapPromptRow((data ?? [shapedPayload])[0], supabaseSchema.prompts.columns);
       setPrompts((prev) =>
         [...prev, entry].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
       );
@@ -646,7 +925,7 @@ export default function App() {
 
   const handleAddLink = async (event) => {
     event.preventDefault();
-    if (!currentUser || !supabaseReady) return;
+    if (!currentUser || !storageReady) return;
     const form = new FormData(event.currentTarget);
     const name = String(form.get("name") || "").trim();
     const url = String(form.get("url") || "").trim();
@@ -664,12 +943,13 @@ export default function App() {
         uploader_email: currentUser.email,
         created_at: createdAt,
       };
-      const data = await supabaseRequest("links", {
+      const shapedPayload = shapeSupabasePayload(supabaseSchema.links, payload);
+      const data = await supabaseRequest(supabaseSchema.links.table, {
         method: "POST",
         headers: { Prefer: "return=representation" },
-        body: JSON.stringify([payload]),
+        body: JSON.stringify([shapedPayload]),
       });
-      const entry = mapLinkRow((data ?? [payload])[0]);
+      const entry = mapLinkRow((data ?? [shapedPayload])[0], supabaseSchema.links.columns);
       setLinks((prev) =>
         [...prev, entry].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
       );
@@ -751,7 +1031,7 @@ export default function App() {
 
   const handleAddScript = async (event) => {
     event.preventDefault();
-    if (!currentUser || !supabaseReady) return;
+    if (!currentUser || !storageReady) return;
     const form = new FormData(event.currentTarget);
     const name = String(form.get("name") || "").trim();
     const notes = String(form.get("notes") || "").trim();
@@ -780,12 +1060,13 @@ export default function App() {
           parent_id: parentLogicalId,
           file_content: arrayBufferToBase64(buffer),
         };
-        const data = await supabaseRequest("scripts", {
+        const shapedPayload = shapeSupabasePayload(supabaseSchema.scripts, payload);
+        const data = await supabaseRequest(supabaseSchema.scripts.table, {
           method: "POST",
           headers: { Prefer: "return=representation" },
-          body: JSON.stringify([payload]),
+          body: JSON.stringify([shapedPayload]),
         });
-        const entry = mapScriptRow((data ?? [payload])[0]);
+        const entry = mapScriptRow((data ?? [shapedPayload])[0], supabaseSchema.scripts.columns);
         setScripts((prev) => [...prev, entry]);
         setScriptFiles([]);
         event.currentTarget.reset();
@@ -800,12 +1081,15 @@ export default function App() {
         createdAt,
         parentLogicalId,
       });
-      const data = await supabaseRequest("scripts", {
+      const shapedRows = rows.map((row) => shapeSupabasePayload(supabaseSchema.scripts, row));
+      const data = await supabaseRequest(supabaseSchema.scripts.table, {
         method: "POST",
         headers: { Prefer: "return=representation" },
-        body: JSON.stringify(rows),
+        body: JSON.stringify(shapedRows),
       });
-      const inserted = (data ?? rows).map(mapScriptRow);
+      const inserted = (data ?? shapedRows).map((row) =>
+        mapScriptRow(row, supabaseSchema.scripts.columns)
+      );
       setScripts((prev) => [...prev, ...inserted]);
       setScriptFolderFiles([]);
       event.currentTarget.reset();
@@ -855,12 +1139,14 @@ export default function App() {
   };
 
   const handleDelete = async (category, id) => {
-    if (!supabaseReady) return;
+    if (!storageReady) return;
     try {
       setIsProcessing(true);
       setVaultError("");
       if (category === "prompts") {
-        await supabaseRequest(`prompts?id=eq.${encodeURIComponent(id)}`, { method: "DELETE" });
+        await supabaseRequest(buildFilterPath(supabaseSchema.prompts, "id", id), {
+          method: "DELETE",
+        });
         setPrompts((prev) => prev.filter((item) => item.id !== id));
         setSelectedItems((prev) => prev.filter((item) => !(item.category === category && item.id === id)));
         setPreview((prevPreview) =>
@@ -869,7 +1155,9 @@ export default function App() {
         return;
       }
       if (category === "links") {
-        await supabaseRequest(`links?id=eq.${encodeURIComponent(id)}`, { method: "DELETE" });
+        await supabaseRequest(buildFilterPath(supabaseSchema.links, "id", id), {
+          method: "DELETE",
+        });
         setLinks((prev) => prev.filter((item) => item.id !== id));
         setSelectedItems((prev) => prev.filter((item) => !(item.category === category && item.id === id)));
         setPreview((prevPreview) =>
@@ -881,7 +1169,12 @@ export default function App() {
       const idList = Array.from(ids)
         .map((value) => `"${value}"`)
         .join(",");
-      await supabaseRequest(`scripts?id=in.(${idList})`, { method: "DELETE" });
+      const idColumn = supabaseSchema.scripts.columns.id ?? "id";
+      const encodedValues = encodeURIComponent(`(${idList})`);
+      await supabaseRequest(
+        `${supabaseSchema.scripts.table}?${encodeURIComponent(idColumn)}=in.${encodedValues}`,
+        { method: "DELETE" }
+      );
       pruneScriptItems(ids);
     } catch (error) {
       console.error("Failed to delete item", error);
@@ -1042,7 +1335,7 @@ export default function App() {
 
   const handleEditSubmit = async (event) => {
     event.preventDefault();
-    if (!editingItem || !supabaseReady) return;
+    if (!editingItem || !storageReady) return;
     const form = new FormData(event.currentTarget);
     const name = String(form.get("name") || "").trim();
     const notes = String(form.get("notes") || "").trim();
@@ -1052,10 +1345,15 @@ export default function App() {
       setIsProcessing(true);
       if (editingItem.category === "prompts") {
         const description = String(form.get("description") || "").trim();
-        await supabaseRequest(`prompts?id=eq.${encodeURIComponent(editingItem.item.id)}`, {
+        const updatePayload = shapeSupabasePayload(supabaseSchema.prompts, {
+          name,
+          description,
+          notes,
+        });
+        await supabaseRequest(buildFilterPath(supabaseSchema.prompts, "id", editingItem.item.id), {
           method: "PATCH",
           headers: { Prefer: "return=representation" },
-          body: JSON.stringify({ name, description, notes }),
+          body: JSON.stringify(updatePayload),
         });
         setPrompts((prev) =>
           prev.map((entry) =>
@@ -1064,19 +1362,28 @@ export default function App() {
         );
       } else if (editingItem.category === "links") {
         const url = String(form.get("url") || "").trim();
-        await supabaseRequest(`links?id=eq.${encodeURIComponent(editingItem.item.id)}`, {
+        const updatePayload = shapeSupabasePayload(supabaseSchema.links, {
+          name,
+          url,
+          notes,
+        });
+        await supabaseRequest(buildFilterPath(supabaseSchema.links, "id", editingItem.item.id), {
           method: "PATCH",
           headers: { Prefer: "return=representation" },
-          body: JSON.stringify({ name, url, notes }),
+          body: JSON.stringify(updatePayload),
         });
         setLinks((prev) =>
           prev.map((entry) => (entry.id === editingItem.item.id ? { ...entry, name, url, notes } : entry))
         );
       } else if (editingItem.category === "scripts") {
-        await supabaseRequest(`scripts?id=eq.${encodeURIComponent(editingItem.item.id)}`, {
+        const updatePayload = shapeSupabasePayload(supabaseSchema.scripts, {
+          name,
+          notes,
+        });
+        await supabaseRequest(buildFilterPath(supabaseSchema.scripts, "id", editingItem.item.id), {
           method: "PATCH",
           headers: { Prefer: "return=representation" },
-          body: JSON.stringify({ name, notes }),
+          body: JSON.stringify(updatePayload),
         });
         setScripts((prev) =>
           prev.map((entry) =>
@@ -1562,13 +1869,37 @@ export default function App() {
           <CardContent className="space-y-4">
             <form
               className="flex flex-col gap-3 sm:flex-row"
-              onSubmit={(event) => {
+              onSubmit={async (event) => {
                 event.preventDefault();
+                if (!storageReady) return;
                 const form = new FormData(event.currentTarget);
                 const email = String(form.get("email") || "").trim().toLowerCase();
                 if (!email || allowedEmails.includes(email)) return;
-                setAllowedEmails((prev) => [...prev, email]);
-                event.currentTarget.reset();
+                try {
+                  setIsProcessing(true);
+                  setVaultError("");
+                  const payload = shapeSupabasePayload(supabaseSchema.allowed_emails, {
+                    email,
+                    role: "member",
+                    created_at: new Date().toISOString(),
+                  });
+                  await supabaseRequest(supabaseSchema.allowed_emails.table, {
+                    method: "POST",
+                    headers: { Prefer: "resolution=ignore-duplicates" },
+                    body: JSON.stringify([payload]),
+                  });
+                  setAllowedEmails((prev) =>
+                    Array.from(new Set([...prev, email])).sort((a, b) => a.localeCompare(b))
+                  );
+                  event.currentTarget.reset();
+                } catch (error) {
+                  console.error("Failed to store allowed email", error);
+                  setVaultError(
+                    error.message || "Unable to save the approved email in Supabase."
+                  );
+                } finally {
+                  setIsProcessing(false);
+                }
               }}
             >
               <Input
@@ -1578,7 +1909,11 @@ export default function App() {
                 className="flex-1"
                 required
               />
-              <Button type="submit" className="bg-[#1f6feb] text-white hover:bg-[#388bfd]">
+              <Button
+                type="submit"
+                disabled={isBusy || !storageReady}
+                className="bg-[#1f6feb] text-white hover:bg-[#388bfd] disabled:cursor-not-allowed disabled:bg-[#1f6feb]/40 disabled:text-slate-500"
+              >
                 Grant access
               </Button>
             </form>
@@ -1592,11 +1927,26 @@ export default function App() {
                   <Button
                     variant="ghost"
                     size="sm"
-                    disabled={protectedAdminEmails.has(email)}
+                    disabled={protectedAdminEmails.has(email) || isBusy || !storageReady}
                     className="text-rose-300 hover:bg-rose-500/20 hover:text-rose-100 disabled:cursor-not-allowed disabled:text-slate-500"
-                    onClick={() => {
-                      if (protectedAdminEmails.has(email)) return;
-                      setAllowedEmails((prev) => prev.filter((entry) => entry !== email));
+                    onClick={async () => {
+                      if (protectedAdminEmails.has(email) || !storageReady) return;
+                      try {
+                        setIsProcessing(true);
+                        setVaultError("");
+                        await supabaseRequest(
+                          buildFilterPath(supabaseSchema.allowed_emails, "email", email),
+                          { method: "DELETE" }
+                        );
+                        setAllowedEmails((prev) => prev.filter((entry) => entry !== email));
+                      } catch (error) {
+                        console.error("Failed to remove allowed email", error);
+                        setVaultError(
+                          error.message || "Unable to remove the approved email from Supabase."
+                        );
+                      } finally {
+                        setIsProcessing(false);
+                      }
                     }}
                   >
                     Remove
@@ -1705,8 +2055,10 @@ export default function App() {
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-3 text-sm">
-            <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-200">
-              <Cloud className="h-4 w-4 text-[#58a6ff]" /> {supabaseReady ? "Connected to Supabase" : "Storage not configured"}
+            <span
+              className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs ${connectionClasses}`}
+            >
+              <Cloud className={`h-4 w-4 ${storageReady ? "text-[#58a6ff]" : "text-current"}`} /> {connectionLabel}
             </span>
             {vaultStatus && <span className="text-xs text-slate-300">{vaultStatus}</span>}
             {vaultError && (
@@ -1716,7 +2068,7 @@ export default function App() {
             )}
             <Button
               onClick={handleBulkDownload}
-              disabled={!selectedItems.length || isBusy || !supabaseReady}
+              disabled={!selectedItems.length || isBusy || !storageReady}
               className="bg-[#238636] text-white hover:bg-[#2ea043] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
             >
               <Download className="mr-2 h-4 w-4" /> Bulk download ({selectedItems.length})
@@ -1786,7 +2138,7 @@ export default function App() {
                         />
                         <Button
                           type="submit"
-                          disabled={isBusy || !supabaseReady}
+                          disabled={isBusy || !storageReady}
                           className="bg-[#238636] text-white hover:bg-[#2ea043] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
                         >
                           Save prompt
@@ -1833,7 +2185,7 @@ export default function App() {
                         />
                         <Button
                           type="submit"
-                          disabled={isBusy || !supabaseReady}
+                          disabled={isBusy || !storageReady}
                           className="bg-[#1f6feb] text-white hover:bg-[#388bfd] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
                         >
                           Upload
@@ -1865,7 +2217,7 @@ export default function App() {
                         />
                         <Button
                           type="submit"
-                          disabled={isBusy || !supabaseReady}
+                          disabled={isBusy || !storageReady}
                           className="bg-[#bf3989] text-white hover:bg-[#f778ba] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
                         >
                           Save link

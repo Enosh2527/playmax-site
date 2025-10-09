@@ -52,9 +52,21 @@ The app will be available on http://localhost:5173 with the draft ribbon display
 VaultHub now uses [Supabase](https://supabase.com) as its zero-cost cloud vault. Every prompt, link, and script upload is written to your project's Postgres database through the REST API. To get started:
 
 1. Create a Supabase project (the free tier includes 500 MB of database storage which is plenty for prompt text and small script bundles).
-2. In the Supabase dashboard, create three tables using the SQL editor:
+2. In the Supabase dashboard, create the vault tables using the SQL editor:
 
    ```sql
+   create table if not exists public.allowed_emails (
+     email text primary key,
+     role text default 'member',
+     created_at timestamptz default now()
+   );
+
+   insert into public.allowed_emails (email, role)
+   values
+     ('admin@vaulthub.dev', 'admin'),
+     ('rajhanoch24@gmail.com', 'admin')
+   on conflict (email) do update set role = excluded.role;
+
    create table if not exists public.prompts (
      id uuid primary key,
      name text not null,
@@ -91,7 +103,7 @@ VaultHub now uses [Supabase](https://supabase.com) as its zero-cost cloud vault.
    );
    ```
 
-   The app stores script files and folders in this table. Files are base64 encoded and remain lightweight enough for Supabase's free limits.
+   The app stores script files and folders in this table. Files are base64 encoded and remain lightweight enough for Supabase's free limits. The `allowed_emails` table keeps your access list in sync across devices so anyone you approve from the Admin Control Room can register and start uploading straight away.
 3. Open **Project Settings → API** and copy the **Project URL** and **anon public key**.
 4. Create a `.env.local` file with those values so the front-end can talk to your project. You can paste the API URL, the dashboard URL, or just the project ref — the app normalises each format automatically:
 
