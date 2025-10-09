@@ -91,6 +91,28 @@ const SUPABASE_REST_URL = SUPABASE_URL
   ? `${SUPABASE_URL.replace(/\/$/, "")}/rest/v1`
   : "";
 
+function parseSupabaseErrorPayload(payload) {
+  if (!payload) return null;
+  if (typeof payload === "string") {
+    try {
+      const parsed = JSON.parse(payload);
+      return parseSupabaseErrorPayload(parsed) ?? { message: payload };
+    } catch (error) {
+      return { message: payload };
+    }
+  }
+  if (typeof payload === "object") {
+    const { message, code, details, hint } = payload;
+    return {
+      message: typeof message === "string" ? message : "",
+      code: typeof code === "string" ? code : undefined,
+      details: typeof details === "string" ? details : undefined,
+      hint: typeof hint === "string" ? hint : undefined,
+    };
+  }
+  return null;
+}
+
 async function supabaseRequest(path, { method = "GET", headers = {}, body, signal } = {}) {
   if (!SUPABASE_REST_URL) {
     throw new Error("Supabase credentials are not configured.");
@@ -109,7 +131,21 @@ async function supabaseRequest(path, { method = "GET", headers = {}, body, signa
   });
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(text || `Supabase request failed (${response.status})`);
+    const parsed = parseSupabaseErrorPayload(text);
+    const error = new Error(
+      parsed?.message || text || `Supabase request failed (${response.status})`
+    );
+    if (parsed?.code) {
+      error.code = parsed.code;
+    }
+    if (parsed?.details) {
+      error.details = parsed.details;
+    }
+    if (parsed?.hint) {
+      error.hint = parsed.hint;
+    }
+    error.status = response.status;
+    throw error;
   }
   if (response.status === 204) {
     return null;
@@ -298,7 +334,7 @@ function ScriptBreadcrumb({ breadcrumbs, onNavigate }) {
           <button
             onClick={() => onNavigate(crumb.id)}
             className={`rounded-md px-2 py-1 transition ${
-              crumb.active ? "bg-[#238636]/20 text-[#3fb950]" : "hover:bg-white/5"
+              crumb.active ? "bg-[#238636]/20 text-[#3fb950]" : "hover:bg-[#161b22]"
             }`}
           >
             {crumb.label}
@@ -311,8 +347,8 @@ function ScriptBreadcrumb({ breadcrumbs, onNavigate }) {
 
 function EmptyState({ icon: Icon, title, description }) {
   return (
-    <div className="flex flex-col items-center justify-center gap-4 rounded-2xl border border-white/10 bg-white/5 p-10 text-center text-slate-300">
-      <div className="flex h-16 w-16 items-center justify-center rounded-full bg-white/10 text-white">
+    <div className="flex flex-col items-center justify-center gap-4 rounded-2xl border border-[#30363d] bg-[#0d1117] p-10 text-center text-slate-300">
+      <div className="flex h-16 w-16 items-center justify-center rounded-full bg-[#161b22] text-white">
         <Icon className="h-8 w-8" />
       </div>
       <div>
@@ -533,6 +569,37 @@ function ensureAdmins(list) {
   return Array.from(byEmail.values());
 }
 
+const SUPABASE_POLICY_GUIDE =
+  "Supabase blocked this action because row-level security is still enabled. Run the policy script from the README (see the Supabase policies section) inside your project's SQL editor and refresh VaultHub.";
+
+function formatRowLevelSecurityMessage(error) {
+  const tableMatch = error?.message?.match(/table \"([^\"]+)\"/i);
+  const tableSuffix = tableMatch ? ` for the "${tableMatch[1]}" table` : "";
+  const hint = error?.hint ? ` Hint: ${error.hint}` : "";
+  return `${SUPABASE_POLICY_GUIDE.replace(
+    "this action",
+    `this action${tableSuffix}`
+  )}${hint}`;
+}
+
+function formatSupabaseErrorMessage(error, fallback) {
+  if (!error) {
+    return fallback;
+  }
+
+  const message = typeof error.message === "string" ? error.message : "";
+  if (error.code === "42501" || /row-level security/i.test(message)) {
+    return formatRowLevelSecurityMessage(error);
+  }
+  if (error.details && typeof error.details === "string" && error.details.trim().length) {
+    return `${message || fallback}\n${error.details}`;
+  }
+  if (message) {
+    return message;
+  }
+  return fallback;
+}
+
 export default function App() {
   const isDraftMode = import.meta.env.MODE === "draft";
   const supabaseReady = Boolean(SUPABASE_REST_URL && SUPABASE_ANON_KEY);
@@ -617,6 +684,10 @@ export default function App() {
   const contextMenuRef = useRef(null);
 
   const storageReady = supabaseReady;
+  const describeSupabaseError = useCallback(
+    (error, fallback) => formatSupabaseErrorMessage(error, fallback),
+    []
+  );
   const connectionLabel = useMemo(() => {
     if (!supabaseReady) return "Storage not configured";
     if (vaultError) return "Supabase issue";
@@ -690,12 +761,22 @@ export default function App() {
               created_at: new Date().toISOString(),
             })
           );
-          await supabaseRequest(supabaseSchema.allowed_emails.table, {
-            method: "POST",
-            headers: { Prefer: "resolution=ignore-duplicates" },
-            body: JSON.stringify(seedRows),
-          });
-          fetched.push(...missingDefaults);
+          try {
+            await supabaseRequest(supabaseSchema.allowed_emails.table, {
+              method: "POST",
+              headers: { Prefer: "resolution=ignore-duplicates" },
+              body: JSON.stringify(seedRows),
+            });
+            fetched.push(...missingDefaults);
+          } catch (error) {
+            console.warn("Failed to seed default allowed emails", error);
+            setVaultError(
+              describeSupabaseError(
+                error,
+                "Unable to seed the default admin allowlist in Supabase."
+              )
+            );
+          }
         }
         const unique = Array.from(new Set([...initialAllowedEmails, ...fetched])).sort((a, b) =>
           a.localeCompare(b)
@@ -721,7 +802,9 @@ export default function App() {
       setScripts(scriptEntries);
     } catch (error) {
       console.error("Failed to sync Supabase", error);
-      setVaultError(error.message || "Unable to sync the Supabase workspace.");
+      setVaultError(
+        describeSupabaseError(error, "Unable to sync the Supabase workspace.")
+      );
     } finally {
       setWorkspaceLoading(false);
       setVaultStatus("");
@@ -869,7 +952,9 @@ export default function App() {
       event.currentTarget.reset();
     } catch (error) {
       console.error("Failed to add prompt", error);
-      setVaultError(error.message || "Unable to save the prompt to Supabase.");
+      setVaultError(
+        describeSupabaseError(error, "Unable to save the prompt to Supabase.")
+      );
     } finally {
       setIsProcessing(false);
     }
@@ -908,7 +993,9 @@ export default function App() {
       event.currentTarget.reset();
     } catch (error) {
       console.error("Failed to add link", error);
-      setVaultError(error.message || "Unable to save the link to Supabase.");
+      setVaultError(
+        describeSupabaseError(error, "Unable to save the link to Supabase.")
+      );
     } finally {
       setIsProcessing(false);
     }
@@ -1047,7 +1134,9 @@ export default function App() {
       event.currentTarget.reset();
     } catch (error) {
       console.error("Failed to store scripts", error);
-      setVaultError(error.message || "Unable to save the scripts to Supabase.");
+      setVaultError(
+        describeSupabaseError(error, "Unable to save the scripts to Supabase.")
+      );
     } finally {
       setIsProcessing(false);
     }
@@ -1130,7 +1219,9 @@ export default function App() {
       pruneScriptItems(ids);
     } catch (error) {
       console.error("Failed to delete item", error);
-      setVaultError(error.message || "Unable to delete the item from Supabase.");
+      setVaultError(
+        describeSupabaseError(error, "Unable to delete the item from Supabase.")
+      );
     } finally {
       setIsProcessing(false);
     }
@@ -1216,7 +1307,9 @@ export default function App() {
       downloadBlob(zip, `${safeFileName(item.name)}.zip`);
     } catch (error) {
       console.error("Failed to download item", error);
-      setVaultError(error.message || "Unable to download the requested item.");
+      setVaultError(
+        describeSupabaseError(error, "Unable to download the requested item.")
+      );
     } finally {
       setIsProcessing(false);
     }
@@ -1293,7 +1386,9 @@ export default function App() {
       downloadBlob(zip, `vault-bulk-download-${Date.now()}.zip`);
     } catch (error) {
       console.error("Failed to bundle download", error);
-      setVaultError(error.message || "Unable to build the bulk download archive.");
+      setVaultError(
+        describeSupabaseError(error, "Unable to build the bulk download archive.")
+      );
     } finally {
       setIsProcessing(false);
     }
@@ -1310,7 +1405,9 @@ export default function App() {
       downloadBlob(zip, `${category}-bundle-${Date.now()}.zip`);
     } catch (error) {
       console.error("Failed to bundle download", error);
-      setVaultError(error.message || "Unable to build the bulk download archive.");
+      setVaultError(
+        describeSupabaseError(error, "Unable to build the bulk download archive.")
+      );
     } finally {
       setIsProcessing(false);
     }
@@ -1400,7 +1497,9 @@ export default function App() {
       setEditingItem(null);
     } catch (error) {
       console.error("Failed to update item", error);
-      setVaultError(error.message || "Unable to update the item in Supabase.");
+      setVaultError(
+        describeSupabaseError(error, "Unable to update the item in Supabase.")
+      );
     } finally {
       setIsProcessing(false);
     }
@@ -1626,7 +1725,7 @@ export default function App() {
             </div>
             <button
               onClick={() => setEditingItem(null)}
-              className="rounded-full p-2 text-slate-400 hover:bg-white/10 hover:text-white"
+              className="rounded-full p-2 text-slate-400 hover:bg-[#161b22] hover:text-white"
             >
               ✕
             </button>
@@ -1673,7 +1772,7 @@ export default function App() {
                 type="button"
                 onClick={() => setEditingItem(null)}
                 variant="outline"
-                className="border-white/10 bg-white/5 text-white hover:bg-white/10"
+                className="border-[#30363d] bg-[#161b22] text-white hover:bg-[#1b2330]"
               >
                 Cancel
               </Button>
@@ -1701,7 +1800,7 @@ export default function App() {
             await handleDownload(category, item);
             setContextMenu(null);
           }}
-          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-200 transition hover:bg-white/10"
+          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-200 transition hover:bg-[#1b2330]"
         >
           <Download className="h-4 w-4" /> Download
         </button>
@@ -1710,7 +1809,7 @@ export default function App() {
             setEditingItem({ category, item });
             setContextMenu(null);
           }}
-          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-200 transition hover:bg-white/10"
+          className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-200 transition hover:bg-[#1b2330]"
         >
           <PencilLine className="h-4 w-4" /> Edit
         </button>
@@ -1781,14 +1880,14 @@ export default function App() {
         </div>
         <Card className="border-white/10 bg-[#0d1117] text-white shadow-2xl">
           <CardContent className="space-y-6 pt-6">
-            <div className="flex rounded-full border border-white/10 bg-white/10 p-1 text-sm">
+            <div className="flex rounded-full border border-[#30363d] bg-[#161b22] p-1 text-sm">
               <button
                 onClick={() => {
                   setAuthView("login");
                   setAuthError("");
                 }}
                 className={`flex-1 rounded-full px-4 py-2 font-medium transition ${
-                  authView === "login" ? "bg-[#238636] text-white" : "text-slate-200 hover:bg-white/10"
+                  authView === "login" ? "bg-[#238636] text-white" : "text-slate-200 hover:bg-[#1b2330]"
                 }`}
               >
                 <div className="flex items-center justify-center gap-2">
@@ -1801,7 +1900,7 @@ export default function App() {
                   setAuthError("");
                 }}
                 className={`flex-1 rounded-full px-4 py-2 font-medium transition ${
-                  authView === "register" ? "bg-[#1f6feb] text-white" : "text-slate-200 hover:bg-white/10"
+                  authView === "register" ? "bg-[#1f6feb] text-white" : "text-slate-200 hover:bg-[#1b2330]"
                 }`}
               >
                 <div className="flex items-center justify-center gap-2">
@@ -1924,7 +2023,10 @@ export default function App() {
                 } catch (error) {
                   console.error("Failed to store allowed email", error);
                   setVaultError(
-                    error.message || "Unable to save the approved email in Supabase."
+                    describeSupabaseError(
+                      error,
+                      "Unable to save the approved email in Supabase."
+                    )
                   );
                 } finally {
                   setIsProcessing(false);
@@ -1950,7 +2052,7 @@ export default function App() {
               {allowedEmails.map((email) => (
                 <div
                   key={email}
-                  className="flex items-center justify-between rounded-xl border border-white/5 bg-white/5 px-3 py-2 text-sm"
+                  className="flex items-center justify-between rounded-xl border border-[#30363d] bg-[#161b22] px-3 py-2 text-sm"
                 >
                   <span className="text-slate-200">{email}</span>
                   <Button
@@ -1971,7 +2073,10 @@ export default function App() {
                       } catch (error) {
                         console.error("Failed to remove allowed email", error);
                         setVaultError(
-                          error.message || "Unable to remove the approved email from Supabase."
+                          describeSupabaseError(
+                            error,
+                            "Unable to remove the approved email from Supabase."
+                          )
                         );
                       } finally {
                         setIsProcessing(false);
@@ -1998,13 +2103,13 @@ export default function App() {
             {users.map((user) => (
               <div
                 key={user.id}
-                className="flex items-center justify-between rounded-xl border border-white/5 bg-white/5 px-4 py-3"
+                className="flex items-center justify-between rounded-xl border border-[#30363d] bg-[#161b22] px-4 py-3"
               >
                 <div>
                   <p className="font-semibold text-white">{user.name}</p>
                   <p className="text-xs text-slate-400">{user.email}</p>
                 </div>
-                <Badge className={`rounded-full ${user.role === "admin" ? "bg-[#238636]/20 text-[#3fb950]" : "bg-white/10 text-slate-200"}`}>
+                <Badge className={`rounded-full ${user.role === "admin" ? "bg-[#238636]/20 text-[#3fb950]" : "bg-[#1b2330] text-slate-200"}`}>
                   {user.role === "admin" ? "Admin" : "Member"}
                 </Badge>
               </div>

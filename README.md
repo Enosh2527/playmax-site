@@ -116,6 +116,28 @@ VaultHub now uses [Supabase](https://supabase.com) as its zero-cost cloud vault.
 
 5. Restart the dev server. The dashboard will show a “Connected to Supabase” badge once the credentials are valid. Bulk downloads, context menus, and folder uploads all operate directly against your Supabase tables.
 
+### Supabase policies
+
+If Supabase responds with a `row-level security policy` error while you seed admins, upload files, or approve new email addresses, the project still has Row Level Security enabled on one of the vault tables. Clear the block by running the SQL below in the Supabase dashboard (SQL Editor ▶️ **New query**):
+
+```sql
+alter table public.allowed_emails disable row level security;
+alter table public.prompts disable row level security;
+alter table public.links disable row level security;
+alter table public.scripts disable row level security;
+
+create policy "allow anon access" on public.allowed_emails
+  for all to anon using (true) with check (true);
+create policy "allow anon access" on public.prompts
+  for all to anon using (true) with check (true);
+create policy "allow anon access" on public.links
+  for all to anon using (true) with check (true);
+create policy "allow anon access" on public.scripts
+  for all to anon using (true) with check (true);
+```
+
+Disabling RLS (or adding the permissive policies above) is enough for closed internal vaults that rely on the anon key bundled with this project. If you later migrate to Supabase Auth you can replace the permissive policies with rules that reference `auth.uid()` or `auth.email()`.
+
 The default Playmax build points at the shared project `cauostpphtbzfyejffhk` using the anon key
 `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNhdW9zdHBwaHRiemZ5ZWpmZmhrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk5NjAyMjQsImV4cCI6MjA3NTUzNjIyNH0.JTucDx5zwBf2tk8LndLumLXInKc5BFDhvjxO9fZd7kI`, so you can run the app without creating your own Supabase account if you just want to test uploads and downloads.
 
