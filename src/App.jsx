@@ -591,9 +591,7 @@ export default function App() {
   const [scripts, setScripts] = useState([]);
   const [links, setLinks] = useState([]);
 
-  const [supabaseSchema, setSupabaseSchema] = useState(defaultSupabaseSchema);
-  const [schemaReady, setSchemaReady] = useState(false);
-  const [schemaIssues, setSchemaIssues] = useState([]);
+  const supabaseSchema = defaultSupabaseSchema;
 
   const [vaultError, setVaultError] = useState(() =>
     supabaseReady ? "" : "Supabase credentials are missing. Update your environment variables to enable cloud storage."
@@ -607,6 +605,9 @@ export default function App() {
   const [preview, setPreview] = useState(null);
   const [contextMenu, setContextMenu] = useState(null);
   const [editingItem, setEditingItem] = useState(null);
+  const [linkDownloadTarget, setLinkDownloadTarget] = useState(null);
+
+  const [activeTab, setActiveTab] = useState("scripts");
 
   const [scriptMode, setScriptMode] = useState("file");
   const [scriptFiles, setScriptFiles] = useState([]);
@@ -615,22 +616,22 @@ export default function App() {
   const folderInputRef = useRef(null);
   const contextMenuRef = useRef(null);
 
-  const storageReady = supabaseReady && schemaReady && schemaIssues.length === 0;
+  const storageReady = supabaseReady;
   const connectionLabel = useMemo(() => {
     if (!supabaseReady) return "Storage not configured";
-    if (schemaIssues.length) return "Schema mismatch";
-    if (!schemaReady) return "Checking schema…";
+    if (vaultError) return "Supabase issue";
+    if (workspaceLoading) return "Syncing Supabase…";
     return "Connected to Supabase";
-  }, [schemaIssues.length, schemaReady, supabaseReady]);
+  }, [supabaseReady, vaultError, workspaceLoading]);
   const connectionClasses = useMemo(() => {
-    if (schemaIssues.length) {
+    if (!supabaseReady) {
+      return "border-white/10 bg-[#161b22] text-slate-300";
+    }
+    if (vaultError) {
       return "border-amber-400/30 bg-amber-500/10 text-amber-100";
     }
-    if (storageReady) {
-      return "border-[#58a6ff]/40 bg-[#0b2f53] text-[#9cc4ff]";
-    }
-    return "border-white/10 bg-[#161b22] text-slate-300";
-  }, [schemaIssues.length, storageReady]);
+    return "border-[#58a6ff]/40 bg-[#0b2f53] text-[#9cc4ff]";
+  }, [supabaseReady, vaultError]);
 
   useEffect(() => {
     if (scriptMode !== "folder") return;
@@ -655,66 +656,8 @@ export default function App() {
     window.localStorage.setItem(USERS_KEY, JSON.stringify(users));
   }, [users]);
 
-  useEffect(() => {
-    if (!supabaseReady) {
-      setSchemaReady(false);
-      setSchemaIssues([]);
-      setSupabaseSchema(defaultSupabaseSchema);
-      return;
-    }
-
-    let cancelled = false;
-
-    const inspectSchema = async () => {
-      try {
-        setVaultStatus((status) => status || "Checking Supabase schema…");
-        const rows = await supabaseRequest(
-          "information_schema.columns?table_schema=eq.public&table_name=in.(prompts,links,scripts)&select=table_name,column_name",
-          {
-            headers: { Accept: "application/json" },
-          }
-        );
-        if (cancelled) return;
-        const { mapping, missing } = buildSupabaseSchemaMapping(rows ?? []);
-        setSupabaseSchema(mapping);
-        setSchemaIssues(missing);
-        setSchemaReady(missing.length === 0);
-        if (missing.length) {
-          setVaultError(
-            (prev) =>
-              prev && !prev.toLowerCase().includes("missing")
-                ? prev
-                : `Supabase table "${missing[0].table}" is missing the "${missing[0].column}" column. Run the SQL snippet in the README to finish your setup.`
-          );
-        } else {
-          setVaultError((prev) =>
-            prev && prev.startsWith("Supabase table") ? "" : prev
-          );
-        }
-      } catch (error) {
-        if (cancelled) return;
-        console.error("Failed to inspect Supabase schema", error);
-        setSchemaReady(false);
-        setSchemaIssues([{ table: "prompts", column: "name" }]);
-        setVaultError(
-          error.message || "Unable to inspect the Supabase schema. Check your project permissions."
-        );
-      } finally {
-        if (!cancelled) {
-          setVaultStatus((prev) => (prev === "Checking Supabase schema…" ? "" : prev));
-        }
-      }
-    };
-
-    inspectSchema();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [supabaseReady]);
-
   const refreshWorkspace = useCallback(async () => {
-    if (!supabaseReady || !schemaReady) {
+    if (!supabaseReady) {
       return;
     }
     try {
@@ -783,14 +726,14 @@ export default function App() {
       setWorkspaceLoading(false);
       setVaultStatus("");
     }
-  }, [schemaReady, supabaseReady, supabaseSchema]);
+  }, [supabaseReady, supabaseSchema]);
 
   useEffect(() => {
-    if (!supabaseReady || !schemaReady) {
+    if (!supabaseReady) {
       return;
     }
     refreshWorkspace();
-  }, [schemaReady, supabaseReady, refreshWorkspace]);
+  }, [supabaseReady, refreshWorkspace]);
 
   useEffect(() => {
     const handleClick = (event) => {
@@ -835,6 +778,15 @@ export default function App() {
       scripts: scripts.filter((item) => item.type === "file").length,
     }),
     [prompts, links, scripts]
+  );
+
+  const selectedCounts = useMemo(
+    () => ({
+      prompts: selectedItems.filter((entry) => entry.category === "prompts").length,
+      scripts: selectedItems.filter((entry) => entry.category === "scripts").length,
+      links: selectedItems.filter((entry) => entry.category === "links").length,
+    }),
+    [selectedItems]
   );
 
   const isBusy = isProcessing || workspaceLoading;
@@ -1226,7 +1178,19 @@ export default function App() {
     [scripts]
   );
 
-  const handleDownload = async (category, item) => {
+  const LINK_EXPORT_FORMATS = [
+    { ext: "txt", label: "Plain text (.txt)", mime: "text/plain" },
+    { ext: "md", label: "Markdown (.md)", mime: "text/markdown" },
+    { ext: "pdf", label: "PDF (.pdf)", mime: "application/pdf" },
+    { ext: "docx", label: "Word (.docx)", mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" },
+    { ext: "py", label: "Python (.py)", mime: "text/x-python" },
+  ];
+
+  const handleDownload = async (category, item, options = {}) => {
+    if (category === "links" && !options.format) {
+      setLinkDownloadTarget({ category, item });
+      return;
+    }
     try {
       setIsProcessing(true);
       if (category === "prompts") {
@@ -1235,8 +1199,10 @@ export default function App() {
         return;
       }
       if (category === "links") {
+        const chosen = LINK_EXPORT_FORMATS.find((entry) => entry.ext === options.format) ?? LINK_EXPORT_FORMATS[0];
         const content = `Name: ${item.name}\nURL: ${item.url}\nNotes: ${item.notes || "-"}\nUploaded by: ${item.uploader} (${item.uploaderEmail})`;
-        downloadBlob(new Blob([content], { type: "text/plain" }), safeFileName(item.name, "txt"));
+        const blob = new Blob([content], { type: chosen.mime || "text/plain" });
+        downloadBlob(blob, safeFileName(item.name, chosen.ext));
         return;
       }
       if (item.type === "file") {
@@ -1256,7 +1222,7 @@ export default function App() {
     }
   };
 
-  const gatherSelectionEntries = useCallback(async () => {
+  const gatherSelectionEntries = useCallback(async (selection = selectedItems) => {
     const entries = [];
     const added = new Set();
 
@@ -1266,7 +1232,7 @@ export default function App() {
       entries.push(entry);
     };
 
-    for (const { category, id } of selectedItems) {
+    for (const { category, id } of selection) {
       if (category === "prompts") {
         const prompt = prompts.find((entry) => entry.id === id);
         if (!prompt) continue;
@@ -1325,6 +1291,23 @@ export default function App() {
       if (!entries.length) return;
       const zip = createZip(entries);
       downloadBlob(zip, `vault-bulk-download-${Date.now()}.zip`);
+    } catch (error) {
+      console.error("Failed to bundle download", error);
+      setVaultError(error.message || "Unable to build the bulk download archive.");
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  const handleBulkDownloadForCategory = async (category) => {
+    const selection = selectedItems.filter((entry) => entry.category === category);
+    if (!selection.length) return;
+    try {
+      setIsProcessing(true);
+      const entries = await gatherSelectionEntries(selection);
+      if (!entries.length) return;
+      const zip = createZip(entries);
+      downloadBlob(zip, `${category}-bundle-${Date.now()}.zip`);
     } catch (error) {
       console.error("Failed to bundle download", error);
       setVaultError(error.message || "Unable to build the bulk download archive.");
@@ -1432,34 +1415,50 @@ export default function App() {
     const isSelected = selectedItems.some((entry) => entry.category === category && entry.id === item.id);
     const Icon =
       category === "prompts" ? FileText : category === "links" ? Link2 : item.type === "folder" ? Folder : FileText;
+    const isActivePreview = preview?.category === category && preview.item.id === item.id;
     return (
-      <button
+      <div
         key={item.id}
+        role="button"
+        tabIndex={0}
         onClick={() => setPreview({ category, item })}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            setPreview({ category, item });
+          }
+        }}
         onContextMenu={(event) => handleContextMenu(event, category, item)}
-        className={`group flex w-full items-center justify-between rounded-2xl border border-white/5 bg-white/5 p-4 text-left transition hover:border-white/20 hover:bg-white/10 ${
-          isSelected ? "border-[#1f6feb]/60 bg-[#1f6feb]/10" : ""
+        className={`group flex w-full items-start justify-between rounded-2xl border border-[#30363d] bg-[#0d1117] p-4 text-left transition hover:border-[#58a6ff]/40 hover:bg-[#161b22] focus:outline-none focus:ring-2 focus:ring-[#58a6ff]/40 ${
+          isSelected || isActivePreview ? "border-[#58a6ff]/60 bg-[#111c2e]" : ""
         }`}
       >
-        <div className="flex items-center gap-4">
+        <div className="flex items-start gap-4">
+          <input
+            type="checkbox"
+            checked={isSelected}
+            onClick={(event) => event.stopPropagation()}
+            onChange={() => toggleSelection(category, item.id)}
+            className="mt-1 h-5 w-5 cursor-pointer rounded border-[#30363d] bg-[#161b22] text-[#58a6ff] focus:ring-[#58a6ff]"
+          />
           <div
-            className={`flex h-12 w-12 items-center justify-center rounded-xl ${
+            className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl ${
               category === "prompts"
-                ? "bg-[#238636]/15 text-[#3fb950]"
+                ? "bg-[#1b4728] text-[#3fb950]"
                 : category === "links"
-                ? "bg-[#bf3989]/15 text-[#f778ba]"
+                ? "bg-[#4b1d34] text-[#f778ba]"
                 : item.type === "folder"
-                ? "bg-[#d29922]/20 text-[#f2cc60]"
-                : "bg-[#1f6feb]/15 text-[#58a6ff]"
+                ? "bg-[#4d380a] text-[#f2cc60]"
+                : "bg-[#0e305c] text-[#58a6ff]"
             }`}
           >
             <Icon className="h-5 w-5" />
           </div>
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <p className="text-lg font-semibold text-white">{item.name}</p>
               {category === "scripts" && item.type === "folder" && (
-                <Badge className="rounded-full bg-[#d29922]/20 text-xs text-[#f2cc60]">Folder</Badge>
+                <Badge className="rounded-full bg-[#f2cc60]/20 text-xs text-[#f2cc60]">Folder</Badge>
               )}
             </div>
             <p className="mt-1 text-xs text-slate-400">
@@ -1467,22 +1466,11 @@ export default function App() {
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-3 opacity-0 transition group-hover:opacity-100">
-          <button
-            onClick={(event) => {
-              event.stopPropagation();
-              toggleSelection(category, item.id);
-            }}
-            className={`rounded-full border border-white/10 px-3 py-1 text-xs font-medium transition ${
-              isSelected ? "bg-white/20 text-white" : "hover:bg-white/10 text-slate-300"
-            }`}
-          >
-            {isSelected ? "Selected" : "Select"}
-          </button>
+        <div className="flex items-center gap-2 opacity-0 transition group-hover:opacity-100">
           <Button
             variant="ghost"
             size="icon"
-            className="text-slate-400 hover:bg-white/10 hover:text-white"
+            className="text-slate-400 hover:bg-[#1f6feb]/10 hover:text-white"
             onClick={(event) => {
               event.stopPropagation();
               handleContextMenu(event, category, item);
@@ -1491,17 +1479,18 @@ export default function App() {
             <MoreHorizontal className="h-4 w-4" />
           </Button>
         </div>
-      </button>
+      </div>
     );
   };
 
-  const renderPreview = () => {
-    if (!preview) {
+  const renderPreview = (categoryFilter = null) => {
+    if (!preview || (categoryFilter && preview.category !== categoryFilter)) {
+      const label = categoryFilter ? categoryFilter.charAt(0).toUpperCase() + categoryFilter.slice(1) : "item";
       return (
-        <Card className="border-white/10 bg-[#0d1117] text-white">
+        <Card className="border-[#30363d] bg-[#0d1117] text-white">
           <CardContent className="flex h-full flex-col items-center justify-center gap-3 py-16 text-center text-slate-400">
             <Database className="h-10 w-10 text-slate-500" />
-            <p className="max-w-xs text-sm">Select a prompt, script, or link to see its details here.</p>
+            <p className="max-w-xs text-sm">Select a {label.toLowerCase()} to preview its notes and metadata.</p>
           </CardContent>
         </Card>
       );
@@ -1509,7 +1498,7 @@ export default function App() {
 
     const { category, item } = preview;
     return (
-      <Card className="border-white/10 bg-[#0d1117] text-white">
+      <Card className="border-[#30363d] bg-[#0d1117] text-white">
         <CardHeader className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <CardTitle className="text-white">{item.name}</CardTitle>
@@ -1518,9 +1507,9 @@ export default function App() {
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <Badge className="bg-white/10 text-xs text-slate-200">{category.toUpperCase()}</Badge>
+            <Badge className="bg-[#161b22] text-xs text-slate-200">{category.toUpperCase()}</Badge>
             {category === "scripts" && item.type === "folder" && (
-              <Badge className="bg-[#d29922]/20 text-xs text-[#f2cc60]">Folder</Badge>
+              <Badge className="bg-[#4d380a] text-xs text-[#f2cc60]">Folder</Badge>
             )}
           </div>
         </CardHeader>
@@ -1529,13 +1518,13 @@ export default function App() {
             <div className="space-y-4">
               <div>
                 <p className="text-xs uppercase tracking-wide text-slate-400">Description</p>
-                <p className="mt-1 whitespace-pre-wrap rounded-lg border border-white/5 bg-black/20 p-3 text-sm text-slate-100">
+                <p className="mt-1 whitespace-pre-wrap rounded-lg border border-[#30363d] bg-[#161b22] p-3 text-sm text-slate-100">
                   {item.description || "No description provided."}
                 </p>
               </div>
               <div>
                 <p className="text-xs uppercase tracking-wide text-slate-400">Notes</p>
-                <p className="mt-1 whitespace-pre-wrap rounded-lg border border-white/5 bg-black/20 p-3 text-sm text-slate-100">
+                <p className="mt-1 whitespace-pre-wrap rounded-lg border border-[#30363d] bg-[#161b22] p-3 text-sm text-slate-100">
                   {item.notes || "No notes yet."}
                 </p>
               </div>
@@ -1549,14 +1538,14 @@ export default function App() {
                   href={item.url}
                   target="_blank"
                   rel="noreferrer"
-                  className="mt-1 inline-flex items-center gap-2 rounded-lg border border-white/5 bg-black/20 px-3 py-2 text-sm text-[#58a6ff] hover:bg-white/5"
+                  className="mt-1 inline-flex items-center gap-2 rounded-lg border border-[#30363d] bg-[#161b22] px-3 py-2 text-sm text-[#58a6ff] hover:bg-[#1b2330]"
                 >
                   {item.url}
                 </a>
               </div>
               <div>
                 <p className="text-xs uppercase tracking-wide text-slate-400">Notes</p>
-                <p className="mt-1 whitespace-pre-wrap rounded-lg border border-white/5 bg-black/20 p-3 text-sm text-slate-100">
+                <p className="mt-1 whitespace-pre-wrap rounded-lg border border-[#30363d] bg-[#161b22] p-3 text-sm text-slate-100">
                   {item.notes || "No notes yet."}
                 </p>
               </div>
@@ -1565,14 +1554,14 @@ export default function App() {
           {category === "scripts" && (
             <div className="space-y-4">
               {item.type === "file" ? (
-                <div className="rounded-lg border border-white/5 bg-black/20 p-4 text-sm text-slate-300">
+                <div className="rounded-lg border border-[#30363d] bg-[#161b22] p-4 text-sm text-slate-300">
                   <p className="font-semibold text-white">File details</p>
                   <p className="mt-2">Original name: {item.originalName || item.name}</p>
                   <p>Size: {item.size ? `${(item.size / 1024).toFixed(1)} KB` : "Unknown"}</p>
                   <p>Type: {item.mimeType}</p>
                 </div>
               ) : (
-                <div className="rounded-lg border border-white/5 bg-black/20 p-4 text-sm text-slate-300">
+                <div className="rounded-lg border border-[#30363d] bg-[#161b22] p-4 text-sm text-slate-300">
                   <p className="font-semibold text-white">Folder contents</p>
                   <div className="mt-3 space-y-2">
                     {scripts
@@ -1595,7 +1584,7 @@ export default function App() {
               )}
               <div>
                 <p className="text-xs uppercase tracking-wide text-slate-400">Notes</p>
-                <p className="mt-1 whitespace-pre-wrap rounded-lg border border-white/5 bg-black/20 p-3 text-sm text-slate-100">
+                <p className="mt-1 whitespace-pre-wrap rounded-lg border border-[#30363d] bg-[#161b22] p-3 text-sm text-slate-100">
                   {item.notes || "No notes yet."}
                 </p>
               </div>
@@ -1606,7 +1595,7 @@ export default function App() {
             <Button
               onClick={async () => handleDownload(category, item)}
               disabled={isBusy}
-              className="bg-[#1f6feb] text-white hover:bg-[#388bfd] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
+              className="bg-[#1f6feb] text-white hover:bg-[#388bfd] disabled:cursor-not-allowed disabled:bg-[#161b22] disabled:text-slate-500"
             >
               <Download className="mr-2 h-4 w-4" /> Download
             </Button>
@@ -1614,7 +1603,7 @@ export default function App() {
               variant="outline"
               onClick={() => setEditingItem({ category, item })}
               disabled={isBusy}
-              className="border-white/10 bg-white/5 text-white hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-50"
+              className="border-[#30363d] bg-[#161b22] text-white hover:bg-[#1b2330] disabled:cursor-not-allowed disabled:opacity-50"
             >
               <PencilLine className="mr-2 h-4 w-4" /> Edit details
             </Button>
@@ -1734,6 +1723,46 @@ export default function App() {
         >
           <Trash2 className="h-4 w-4" /> Delete
         </button>
+      </div>
+    );
+  };
+
+  const renderLinkDownloadDialog = () => {
+    if (!linkDownloadTarget) return null;
+    const { item } = linkDownloadTarget;
+    return (
+      <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/70 px-4 py-8">
+        <div className="w-full max-w-sm space-y-4 rounded-2xl border border-[#30363d] bg-[#0d1117] p-6 text-slate-100 shadow-2xl">
+          <div>
+            <h3 className="text-lg font-semibold text-white">Download link entry</h3>
+            <p className="mt-1 text-sm text-slate-400">
+              Choose the export format for <span className="font-medium text-white">{item.name}</span>. The link details will be saved using structured text with the selected extension.
+            </p>
+          </div>
+          <div className="space-y-2">
+            {LINK_EXPORT_FORMATS.map((format) => (
+              <button
+                key={format.ext}
+                onClick={async () => {
+                  const target = linkDownloadTarget;
+                  setLinkDownloadTarget(null);
+                  await handleDownload("links", target.item, { format: format.ext });
+                }}
+                className="flex w-full items-center justify-between rounded-xl border border-[#30363d] bg-[#161b22] px-4 py-3 text-left text-sm text-slate-100 transition hover:border-[#58a6ff]/50 hover:bg-[#1b2330]"
+              >
+                <span className="font-medium text-white">{format.label}</span>
+                <ChevronRight className="h-4 w-4 text-slate-400" />
+              </button>
+            ))}
+          </div>
+          <Button
+            onClick={() => setLinkDownloadTarget(null)}
+            variant="outline"
+            className="w-full border-[#30363d] bg-[#161b22] text-slate-200 hover:bg-[#1b2330]"
+          >
+            Cancel
+          </Button>
+        </div>
       </div>
     );
   };
@@ -1986,24 +2015,314 @@ export default function App() {
     </div>
   );
 
-  const renderDashboard = () => (
+
+const renderScriptsTab = () => {
+  const selectedCount = selectedCounts.scripts;
+  return (
+    <div className="space-y-6">
+      <div className="grid gap-6 xl:grid-cols-[1.25fr_1fr]">
+        <Card className="border-[#30363d] bg-[#0d1117] text-white">
+          <CardHeader className="space-y-1">
+            <CardTitle className="flex items-center gap-2 text-white">
+              <UploadCloud className="h-5 w-5 text-[#58a6ff]" /> Upload scripts
+            </CardTitle>
+            <p className="text-sm text-slate-400">
+              Add single automation files or mirror entire folders. Notes stay attached for fast hand-offs.
+            </p>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            <div className="flex flex-wrap items-center gap-3 text-sm text-slate-300">
+              <span className="rounded-full border border-[#30363d] bg-[#161b22] px-3 py-1 text-xs uppercase tracking-wide">
+                {scriptMode === "file" ? "Single upload" : "Folder upload"}
+              </span>
+              <div className="flex rounded-full border border-[#30363d] bg-[#161b22] p-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setScriptMode("file");
+                    setScriptFolderFiles([]);
+                  }}
+                  className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                    scriptMode === "file" ? "bg-[#1f6feb] text-white" : "text-slate-300 hover:bg-[#1b2330]"
+                  }`}
+                >
+                  Script file
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setScriptMode("folder");
+                    setScriptFiles([]);
+                  }}
+                  className={`rounded-full px-3 py-1 text-xs font-medium transition ${
+                    scriptMode === "folder" ? "bg-[#238636] text-white" : "text-slate-300 hover:bg-[#1b2330]"
+                  }`}
+                >
+                  Script folder
+                </button>
+              </div>
+            </div>
+
+            <form onSubmit={handleAddScript} className="space-y-4">
+              <div className="grid gap-4 lg:grid-cols-2">
+                <div className="space-y-4">
+                  <Input
+                    name="name"
+                    placeholder={scriptMode === "file" ? "Display name" : "Folder name"}
+                    className="bg-[#161b22]"
+                  />
+                  <Textarea
+                    name="notes"
+                    placeholder="Context, setup steps, secrets, etc."
+                    className="min-h-[140px] bg-[#161b22]"
+                  />
+                </div>
+                <div className="space-y-3">
+                  {scriptMode === "file" ? (
+                    <Input
+                      type="file"
+                      onChange={(event) => setScriptFiles(Array.from(event.target.files || []))}
+                      className="bg-[#161b22] file:mr-3 file:rounded-lg file:border-0 file:bg-[#1f6feb] file:px-4 file:py-2 file:text-sm file:text-white"
+                      required
+                    />
+                  ) : (
+                    <div className="space-y-2">
+                      <Input
+                        ref={folderInputRef}
+                        type="file"
+                        multiple
+                        onChange={(event) => setScriptFolderFiles(Array.from(event.target.files || []))}
+                        className="bg-[#161b22] file:mr-3 file:rounded-lg file:border-0 file:bg-[#1f6feb] file:px-4 file:py-2 file:text-sm file:text-white"
+                        required
+                      />
+                      {scriptFolderFiles.length > 0 && (
+                        <p className="text-xs text-slate-400">{scriptFolderFiles.length} items ready to upload</p>
+                      )}
+                    </div>
+                  )}
+                  {scriptMode === "file" && scriptFiles.length > 0 && (
+                    <p className="text-xs text-slate-400">Selected: {scriptFiles[0].name}</p>
+                  )}
+                </div>
+              </div>
+              <div className="flex justify-end">
+                <Button
+                  type="submit"
+                  disabled={isBusy || !storageReady}
+                  className="bg-[#1f6feb] text-white hover:bg-[#388bfd] disabled:cursor-not-allowed disabled:bg-[#161b22] disabled:text-slate-500"
+                >
+                  Upload
+                </Button>
+              </div>
+            </form>
+          </CardContent>
+        </Card>
+
+        <div className="space-y-6">
+          <Card className="border-[#30363d] bg-[#0d1117] text-white">
+            <CardHeader className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <CardTitle className="text-white">Scripts</CardTitle>
+                <p className="text-sm text-slate-400">Navigate folders and manage uploaded automation assets.</p>
+              </div>
+              <Button
+                onClick={() => handleBulkDownloadForCategory("scripts")}
+                disabled={!selectedCount || isBusy || !storageReady}
+                className="bg-[#238636] text-white hover:bg-[#2ea043] disabled:cursor-not-allowed disabled:bg-[#161b22] disabled:text-slate-500"
+              >
+                <Download className="mr-2 h-4 w-4" /> Bulk download ({selectedCount})
+              </Button>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <ScriptBreadcrumb breadcrumbs={scriptBreadcrumbs} onNavigate={setCurrentScriptFolderId} />
+              <div className="space-y-3">
+                {scriptsInView.length ? (
+                  scriptsInView.map((script) => renderListItem("scripts", script))
+                ) : (
+                  <EmptyState
+                    icon={Folder}
+                    title="This folder is empty"
+                    description="Upload a file or folder to populate this space."
+                  />
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
+          {renderPreview("scripts")}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const renderPromptsTab = () => {
+  const selectedCount = selectedCounts.prompts;
+  return (
+    <div className="grid gap-6 xl:grid-cols-[1fr_1fr]">
+      <Card className="border-[#30363d] bg-[#0d1117] text-white">
+        <CardHeader className="space-y-1">
+          <CardTitle className="flex items-center gap-2 text-white">
+            <FileText className="h-5 w-5 text-[#3fb950]" /> Save a prompt
+          </CardTitle>
+          <p className="text-sm text-slate-400">Capture your favourite templates with descriptions and execution notes.</p>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={handleAddPrompt} className="space-y-4">
+            <Input name="name" placeholder="Prompt title" required className="bg-[#161b22]" />
+            <Textarea
+              name="description"
+              placeholder="Short summary"
+              className="min-h-[100px] bg-[#161b22]"
+            />
+            <Textarea
+              name="notes"
+              placeholder="Full prompt or reminders"
+              className="min-h-[160px] bg-[#161b22]"
+            />
+            <div className="flex justify-end">
+              <Button
+                type="submit"
+                disabled={isBusy || !storageReady}
+                className="bg-[#238636] text-white hover:bg-[#2ea043] disabled:cursor-not-allowed disabled:bg-[#161b22] disabled:text-slate-500"
+              >
+                Save prompt
+              </Button>
+            </div>
+          </form>
+        </CardContent>
+      </Card>
+
+      <div className="space-y-6">
+        <Card className="border-[#30363d] bg-[#0d1117] text-white">
+          <CardHeader className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <CardTitle className="text-white">Prompt library</CardTitle>
+              <p className="text-sm text-slate-400">Right-click any prompt to edit, download, or remove it.</p>
+            </div>
+            <Button
+              onClick={() => handleBulkDownloadForCategory("prompts")}
+              disabled={!selectedCount || isBusy || !storageReady}
+              className="bg-[#238636] text-white hover:bg-[#2ea043] disabled:cursor-not-allowed disabled:bg-[#161b22] disabled:text-slate-500"
+            >
+              <Download className="mr-2 h-4 w-4" /> Bulk download ({selectedCount})
+            </Button>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {prompts.length ? (
+              prompts
+                .slice()
+                .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
+                .map((prompt) => renderListItem("prompts", prompt))
+            ) : (
+              <EmptyState
+                icon={FileText}
+                title="No prompts yet"
+                description="Add your first prompt to keep it handy for future sessions."
+              />
+            )}
+          </CardContent>
+        </Card>
+
+        {renderPreview("prompts")}
+      </div>
+    </div>
+  );
+};
+
+const renderLinksTab = () => {
+  const selectedCount = selectedCounts.links;
+  return (
+    <div className="grid gap-6 xl:grid-cols-[1fr_1fr]">
+      <Card className="border-[#30363d] bg-[#0d1117] text-white">
+        <CardHeader className="space-y-1">
+          <CardTitle className="flex items-center gap-2 text-white">
+            <Link2 className="h-5 w-5 text-[#f778ba]" /> Save a link
+          </CardTitle>
+          <p className="text-sm text-slate-400">Collect references, tutorials, and documentation with helpful context.</p>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={handleAddLink} className="space-y-4">
+            <Input name="name" placeholder="Resource name" required className="bg-[#161b22]" />
+            <Input name="url" type="url" placeholder="https://" required className="bg-[#161b22]" />
+            <Textarea
+              name="notes"
+              placeholder="Why this link matters"
+              className="min-h-[140px] bg-[#161b22]"
+            />
+            <div className="flex justify-end">
+              <Button
+                type="submit"
+                disabled={isBusy || !storageReady}
+                className="bg-[#bf3989] text-white hover:bg-[#f778ba] disabled:cursor-not-allowed disabled:bg-[#161b22] disabled:text-slate-500"
+              >
+                Save link
+              </Button>
+            </div>
+          </form>
+        </CardContent>
+      </Card>
+
+      <div className="space-y-6">
+        <Card className="border-[#30363d] bg-[#0d1117] text-white">
+          <CardHeader className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <CardTitle className="text-white">Link directory</CardTitle>
+              <p className="text-sm text-slate-400">Download entries in the format you need straight from the context menu.</p>
+            </div>
+            <Button
+              onClick={() => handleBulkDownloadForCategory("links")}
+              disabled={!selectedCount || isBusy || !storageReady}
+              className="bg-[#238636] text-white hover:bg-[#2ea043] disabled:cursor-not-allowed disabled:bg-[#161b22] disabled:text-slate-500"
+            >
+              <Download className="mr-2 h-4 w-4" /> Bulk download ({selectedCount})
+            </Button>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {links.length ? (
+              links
+                .slice()
+                .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
+                .map((link) => renderListItem("links", link))
+            ) : (
+              <EmptyState
+                icon={Link2}
+                title="No links saved"
+                description="Keep your go-to resources a click away by adding them here."
+              />
+            )}
+          </CardContent>
+        </Card>
+
+        {renderPreview("links")}
+      </div>
+    </div>
+  );
+};
+
+const renderDashboard = () => {
+  const tabDefinitions = [
+    { id: "scripts", label: "Scripts", icon: Layers, description: "Automation files and folders" },
+    { id: "prompts", label: "Prompts", icon: FileText, description: "Reusable writing templates" },
+    { id: "links", label: "Links", icon: Link2, description: "Reference URLs and notes" },
+  ];
+
+  return (
     <div className="space-y-8">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h1 className="text-3xl font-bold text-white">Vault Dashboard</h1>
-          <p className="mt-1 text-sm text-slate-300">
-            Organise prompts, automation scripts, and research links with a familiar GitHub aesthetic.
-          </p>
+          <p className="mt-1 text-sm text-slate-300">Manage prompts, scripts, and research links in one secure workspace.</p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           {currentUser && (
-            <span className="rounded-full border border-white/10 bg-white/10 px-4 py-1 text-sm text-slate-200">
+            <span className="rounded-full border border-[#30363d] bg-[#161b22] px-4 py-1 text-sm text-slate-200">
               Signed in as <span className="font-semibold text-white">{currentUser.name}</span>
             </span>
           )}
           <Button
             variant="outline"
-            className="border-white/10 bg-white/5 text-white hover:bg-white/10"
+            className="border-[#30363d] bg-[#161b22] text-white hover:bg-[#1b2330]"
             onClick={() => setActiveView(activeView === "dashboard" ? "admin" : "dashboard")}
           >
             {activeView === "dashboard" ? "Admin panel" : "Back to dashboard"}
@@ -2024,16 +2343,14 @@ export default function App() {
         {categories.map((category) => {
           const Icon = category.icon;
           return (
-            <div key={category.id} className={`rounded-2xl border border-white/5 bg-gradient-to-br ${category.accent} p-[1px]`}>
-              <div className="rounded-[1.05rem] bg-[#0d1117] p-5">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <p className="text-xs uppercase tracking-wide text-slate-400">{category.label}</p>
-                    <p className="mt-2 text-3xl font-semibold text-white">{totals[category.id]}</p>
-                  </div>
-                  <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-white/10 text-white">
-                    <Icon className="h-6 w-6" />
-                  </div>
+            <div key={category.id} className="rounded-2xl border border-[#30363d] bg-[#0d1117] p-5">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-xs uppercase tracking-wide text-slate-400">{category.label}</p>
+                  <p className="mt-2 text-3xl font-semibold text-white">{totals[category.id]}</p>
+                </div>
+                <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-[#161b22] text-white">
+                  <Icon className="h-6 w-6" />
                 </div>
               </div>
             </div>
@@ -2041,7 +2358,7 @@ export default function App() {
         })}
       </div>
 
-      <div className="rounded-3xl border border-white/10 bg-[#0d1117] p-6">
+      <div className="rounded-3xl border border-[#30363d] bg-[#0d1117] p-6">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#238636]/20 text-[#3fb950]">
@@ -2049,15 +2366,11 @@ export default function App() {
             </div>
             <div>
               <h2 className="text-xl font-semibold text-white">Supabase vault</h2>
-              <p className="text-sm text-slate-400">
-                Files are stored in Supabase tables within your project&apos;s free tier database. Download or edit entries anytime.
-              </p>
+              <p className="text-sm text-slate-400">Cloud storage keeps every upload backed up and shareable.</p>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-3 text-sm">
-            <span
-              className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs ${connectionClasses}`}
-            >
+            <span className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs ${connectionClasses}`}>
               <Cloud className={`h-4 w-4 ${storageReady ? "text-[#58a6ff]" : "text-current"}`} /> {connectionLabel}
             </span>
             {vaultStatus && <span className="text-xs text-slate-300">{vaultStatus}</span>}
@@ -2069,232 +2382,58 @@ export default function App() {
             <Button
               onClick={handleBulkDownload}
               disabled={!selectedItems.length || isBusy || !storageReady}
-              className="bg-[#238636] text-white hover:bg-[#2ea043] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
+              className="bg-[#238636] text-white hover:bg-[#2ea043] disabled:cursor-not-allowed disabled:bg-[#161b22] disabled:text-slate-500"
             >
-              <Download className="mr-2 h-4 w-4" /> Bulk download ({selectedItems.length})
+              <Download className="mr-2 h-4 w-4" /> Download selection ({selectedItems.length})
             </Button>
           </div>
         </div>
 
-        <div className="mt-6 grid gap-6 lg:grid-cols-[2fr_1fr]">
-          <div className="space-y-6">
-            <Card className="border-white/10 bg-[#0d1117]/60 text-white">
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-white">
-                  <UploadCloud className="h-5 w-5 text-[#58a6ff]" /> Add to your vault
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="flex items-center gap-3 text-sm text-slate-400">
-                  <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs uppercase tracking-wide">
-                    {scriptMode === "file" ? "Single upload" : "Folder upload"}
-                  </span>
-                  <div className="flex rounded-full border border-white/10 bg-white/5 p-1">
-                    <button
-                      onClick={() => {
-                        setScriptMode("file");
-                        setScriptFolderFiles([]);
-                      }}
-                      className={`rounded-full px-3 py-1 text-xs font-medium transition ${
-                        scriptMode === "file" ? "bg-[#1f6feb] text-white" : "text-slate-300 hover:bg-white/10"
+        <div className="mt-6 space-y-4">
+          <div className="flex flex-wrap gap-3">
+            {tabDefinitions.map((tab) => {
+              const Icon = tab.icon;
+              const isActive = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setActiveTab(tab.id)}
+                  className={`flex min-w-[220px] flex-1 items-center justify-between rounded-2xl border px-4 py-3 text-left transition ${
+                    isActive
+                      ? "border-[#58a6ff] bg-[#0d1624] shadow-[0_0_0_1px_rgba(88,166,255,0.4)]"
+                      : "border-[#30363d] bg-[#161b22] hover:border-[#58a6ff]/40 hover:bg-[#1b2330]"
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <div
+                      className={`flex h-10 w-10 items-center justify-center rounded-xl ${
+                        isActive ? "bg-[#1f6feb]/20 text-[#58a6ff]" : "bg-[#0e305c] text-[#58a6ff]"
                       }`}
                     >
-                      Script file
-                    </button>
-                    <button
-                      onClick={() => {
-                        setScriptMode("folder");
-                        setScriptFiles([]);
-                      }}
-                      className={`rounded-full px-3 py-1 text-xs font-medium transition ${
-                        scriptMode === "folder" ? "bg-[#238636] text-white" : "text-slate-300 hover:bg-white/10"
-                      }`}
-                    >
-                      Script folder
-                    </button>
-                  </div>
-                </div>
-
-                <div className="mt-6 grid gap-6 lg:grid-cols-3">
-                  <div className="space-y-4 lg:col-span-2">
-                    <div className="rounded-2xl border border-white/5 bg-white/5 p-5">
-                      <h3 className="text-lg font-semibold text-white">Prompts</h3>
-                      <p className="mt-1 text-sm text-slate-400">Store reusable prompt templates with context and reminders.</p>
-                      <form onSubmit={handleAddPrompt} className="mt-4 space-y-3">
-                        <Input
-                          name="name"
-                          placeholder="Prompt title"
-                          required
-                        />
-                        <Textarea
-                          name="description"
-                          placeholder="Short summary"
-                          className="min-h-[80px]"
-                        />
-                        <Textarea
-                          name="notes"
-                          placeholder="Paste the full prompt or any reminders"
-                          className="min-h-[120px]"
-                        />
-                        <Button
-                          type="submit"
-                          disabled={isBusy || !storageReady}
-                          className="bg-[#238636] text-white hover:bg-[#2ea043] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
-                        >
-                          Save prompt
-                        </Button>
-                      </form>
+                      <Icon className="h-5 w-5" />
                     </div>
-
-                    <div className="rounded-2xl border border-white/5 bg-white/5 p-5">
-                      <h3 className="text-lg font-semibold text-white">Scripts</h3>
-                      <p className="mt-1 text-sm text-slate-400">
-                        Upload individual automation files or drag entire folders to mirror their structure.
-                      </p>
-                      <form onSubmit={handleAddScript} className="mt-4 space-y-4">
-                        <Input
-                          name="name"
-                          placeholder={scriptMode === "file" ? "Display name" : "Folder name"}
-                        />
-                        {scriptMode === "file" ? (
-                          <Input
-                            type="file"
-                            onChange={(event) => setScriptFiles(Array.from(event.target.files || []))}
-                            className="file:mr-3 file:rounded-lg file:border-0 file:bg-[#1f6feb] file:px-4 file:py-2 file:text-sm file:text-white"
-                            required
-                          />
-                        ) : (
-                          <div className="space-y-2">
-                            <Input
-                              ref={folderInputRef}
-                              type="file"
-                              multiple
-                              onChange={(event) => setScriptFolderFiles(Array.from(event.target.files || []))}
-                              className="file:mr-3 file:rounded-lg file:border-0 file:bg-[#1f6feb] file:px-4 file:py-2 file:text-sm file:text-white"
-                              required
-                            />
-                            {scriptFolderFiles.length > 0 && (
-                              <p className="text-xs text-slate-400">{scriptFolderFiles.length} items ready to upload</p>
-                            )}
-                          </div>
-                        )}
-                        <Textarea
-                          name="notes"
-                          placeholder="Context, setup steps, secrets, etc."
-                          className="min-h-[120px]"
-                        />
-                        <Button
-                          type="submit"
-                          disabled={isBusy || !storageReady}
-                          className="bg-[#1f6feb] text-white hover:bg-[#388bfd] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
-                        >
-                          Upload
-                        </Button>
-                      </form>
-                    </div>
-
-                    <div className="rounded-2xl border border-white/5 bg-white/5 p-5">
-                      <h3 className="text-lg font-semibold text-white">Links</h3>
-                      <p className="mt-1 text-sm text-slate-400">
-                        Save documentation, tutorials, and references with handy notes for collaborators.
-                      </p>
-                      <form onSubmit={handleAddLink} className="mt-4 space-y-3">
-                        <Input
-                          name="name"
-                          placeholder="Resource name"
-                          required
-                        />
-                        <Input
-                          name="url"
-                          type="url"
-                          placeholder="https://"
-                          required
-                        />
-                        <Textarea
-                          name="notes"
-                          placeholder="Why this link matters"
-                          className="min-h-[120px]"
-                        />
-                        <Button
-                          type="submit"
-                          disabled={isBusy || !storageReady}
-                          className="bg-[#bf3989] text-white hover:bg-[#f778ba] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
-                        >
-                          Save link
-                        </Button>
-                      </form>
+                    <div>
+                      <p className="text-sm font-semibold text-white">{tab.label}</p>
+                      <p className="text-xs text-slate-400">{tab.description}</p>
                     </div>
                   </div>
-
-                  <div className="space-y-6">
-                    <div className="rounded-2xl border border-white/5 bg-white/5 p-5">
-                      <h3 className="text-lg font-semibold text-white">Prompts</h3>
-                      <div className="mt-3 space-y-2">
-                        {prompts.length ? (
-                          prompts
-                            .slice()
-                            .reverse()
-                            .map((prompt) => renderListItem("prompts", prompt))
-                        ) : (
-                          <EmptyState
-                            icon={FileText}
-                            title="No prompts yet"
-                            description="Upload your go-to prompt templates to access them quickly across projects."
-                          />
-                        )}
-                      </div>
-                    </div>
-                    <div className="rounded-2xl border border-white/5 bg-white/5 p-5">
-                      <h3 className="text-lg font-semibold text-white">Links</h3>
-                      <div className="mt-3 space-y-2">
-                        {links.length ? (
-                          links
-                            .slice()
-                            .reverse()
-                            .map((link) => renderListItem("links", link))
-                        ) : (
-                          <EmptyState
-                            icon={Link2}
-                            title="No links saved"
-                            description="Collect tutorials, documentation, and reference URLs so your whole team stays aligned."
-                          />
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
+                  <Badge className="bg-[#161b22] text-xs text-slate-200">{totals[tab.id]}</Badge>
+                </button>
+              );
+            })}
           </div>
 
-          <div className="space-y-6">
-            <Card className="border-white/10 bg-white/5 text-white">
-              <CardHeader>
-                <CardTitle className="text-white">Scripts</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <ScriptBreadcrumb breadcrumbs={scriptBreadcrumbs} onNavigate={setCurrentScriptFolderId} />
-                <div className="space-y-3">
-                  {scriptsInView.length ? (
-                    scriptsInView.map((script) => renderListItem("scripts", script))
-                  ) : (
-                    <EmptyState
-                      icon={Folder}
-                      title="This folder is empty"
-                      description="Drag in a folder or upload a script file to start building your automation library."
-                    />
-                  )}
-                </div>
-              </CardContent>
-            </Card>
-
-            {renderPreview()}
+          <div className="pt-2">
+            {activeTab === "scripts" && renderScriptsTab()}
+            {activeTab === "prompts" && renderPromptsTab()}
+            {activeTab === "links" && renderLinksTab()}
           </div>
         </div>
       </div>
     </div>
   );
-
+};
   if (!currentUser) {
     return renderAuthScreen();
   }
@@ -2321,6 +2460,7 @@ export default function App() {
         )}
       </div>
       {renderContextMenu()}
+      {renderLinkDownloadDialog()}
       {renderEditDrawer()}
     </div>
   );
