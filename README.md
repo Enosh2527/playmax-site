@@ -48,8 +48,8 @@ If you'd like to supply your own keys instead, follow these steps before running
 1. Visit the [Google Cloud Console](https://console.cloud.google.com/) and create a project (or reuse an existing one).
 2. Enable the **Google Drive API** for that project.
 3. Create OAuth 2.0 credentials of type **Web application** with the following settings:
-   - Add each environment (for example `http://localhost:5173`, `http://localhost:4173`, and your deployed hostname) to **Authorized JavaScript origins**.
-   - Leave the redirect URI list empty—VaultHub uses the token-based flow and does not require redirects. If Google shows a `redirect_uri_mismatch` dialog, double-check that the origin you're testing from is listed in the OAuth client configuration.
+   - Add each environment (for example `http://localhost:5173`, `http://localhost:4173`, your production hostname, and any deploy preview URLs) to **Authorized JavaScript origins**.
+   - Leave the redirect URI list empty—VaultHub uses the token-based flow and does not require redirects.
    Copy the generated **Client ID**.
 4. Create an API key for the same project (or reuse an existing key) and restrict it to the Google Drive API if desired.
 5. Create a `.env.local` file in the project root with your credentials:
@@ -60,6 +60,10 @@ If you'd like to supply your own keys instead, follow these steps before running
    ```
 
 6. Restart the dev server (`npm run dev`). Once you log in to the dashboard, click **Connect Google Drive** to authorize the app. A folder named **VaultHub Workspace** will be created automatically with Prompts, Scripts, and Links subfolders for storing your uploads.
+
+### Fixing the `redirect_uri_mismatch` error
+
+If Google blocks the popup with a `redirect_uri_mismatch` message, it means the current site URL hasn't been registered on the OAuth client. Grab the exact origin from your browser's address bar (for example `https://652c1a57ab3a12345--playmax.netlify.app`) and add it to the **Authorized JavaScript origins** list for the Drive OAuth credentials. Save the change, wait a few seconds for it to propagate, then try connecting again.
 
 ## Ready-to-use verification build
 

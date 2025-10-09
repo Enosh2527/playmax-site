@@ -381,9 +381,12 @@ export default function App() {
           const code = error?.error || "authorization_error";
           const description = error?.error_description || "Google Drive authorization failed.";
           if (code === "redirect_uri_mismatch") {
+            const origin = window.location?.origin ?? "your site";
             reject(
               new Error(
-                "Google rejected the Drive request because the authorized redirect URIs on the OAuth client do not include this site. Add your deployment URL (and http://localhost:5173 for local testing) to the Authorized JavaScript origins in the Google Cloud console."
+                `Google rejected the Drive request because the OAuth client hasn't been told about ${origin}.\n\n` +
+                  `Open the Google Cloud console for the client ID ${GOOGLE_CLIENT_ID}, edit the OAuth 2.0 Web credentials, and add ${origin} to **Authorized JavaScript origins**. ` +
+                  "If you're testing from a deploy preview, add that preview URL as well. Save the change, wait a few seconds, then try again."
               )
             );
             return;
