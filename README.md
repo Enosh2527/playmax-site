@@ -65,6 +65,21 @@ If you'd like to supply your own keys instead, follow these steps before running
 
 If Google blocks the popup with a `redirect_uri_mismatch` message, it means the current site URL hasn't been registered on the OAuth client. Grab the exact origin from your browser's address bar (for example `https://652c1a57ab3a12345--playmax.netlify.app`) and add it to the **Authorized JavaScript origins** list for the Drive OAuth credentials. Save the change, wait a few seconds for it to propagate, then try connecting again.
 
+### Troubleshooting Google Drive connection failures
+
+When Drive rejects a request, the dashboard now keeps the exact error text Google returned and surfaces it directly below the **Workspace vault** header. You'll also see the raw `reason`, `status`, and `code` fields so support can pinpoint the fix quickly. A few common resolutions:
+
+- **`insufficientPermissions` / `PERMISSION_DENIED`** – enable the Google Drive API for your OAuth project and list the signing-in account as a test user on the consent screen.
+- **`accessNotConfigured` or messages about the API not being used before** – enable the Drive API in Google Cloud console and retry after a short delay.
+- **`invalid_grant`** – the Drive token has expired or was revoked. Click **Connect Google Drive** again or revoke the existing grant from [Google Account permissions](https://myaccount.google.com/permissions) before reconnecting.
+- **Rate limit errors** – wait a minute before syncing again; Google's throttling should clear automatically.
+
+Share the error card details if you ask for help—they match exactly what Google sent back.
+
+### Why the preview can feel slow the first time
+
+VaultHub now loads Google's authentication libraries lazily, only after you sign in and land on the dashboard. A status banner explains whether the app is "Loading Google authentication libraries…" or "Syncing your Google Drive workspace…" so you know the UI is waiting on Google. The very first load can still take 5–10 seconds while those scripts initialise, but subsequent visits reuse the cached libraries and feel immediate.
+
 ## Ready-to-use verification build
 
 If you want to test the production bundle (the same one you would deploy), build and run the preview server locally. This serves the optimized assets and is the best way to validate upload, download, and admin flows end to end.

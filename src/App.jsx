@@ -68,6 +68,87 @@ const FOLDER_MIME_TYPE = "application/vnd.google-apps.folder";
 
 const textEncoder = new TextEncoder();
 
+const DEFAULT_DRIVE_ERROR_MESSAGE = "Something went wrong while talking to Google Drive.";
+
+function normaliseDriveError(error) {
+  if (!error) {
+    return { message: DEFAULT_DRIVE_ERROR_MESSAGE };
+  }
+
+  if (typeof error === "string") {
+    return { message: error };
+  }
+
+  const gapiError = error?.result?.error;
+  const errorMessage =
+    error?.message ||
+    error?.error_description ||
+    gapiError?.message ||
+    DEFAULT_DRIVE_ERROR_MESSAGE;
+
+  const reason =
+    gapiError?.errors?.[0]?.reason ||
+    gapiError?.reason ||
+    error?.reason ||
+    (typeof error?.error === "string" ? error.error : undefined);
+  const status = gapiError?.status || error?.status;
+  const code = gapiError?.code || error?.code;
+
+  const combinedText = [
+    errorMessage,
+    error?.error_description,
+    gapiError?.message,
+    error?.details,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  let hint = "";
+  if (
+    reason === "insufficientPermissions" ||
+    reason === "forbidden" ||
+    status === "PERMISSION_DENIED" ||
+    combinedText.includes("insufficient permission") ||
+    combinedText.includes("insufficient permissions")
+  ) {
+    hint =
+      "Enable the Google Drive API for this OAuth client and add the signed-in account as a test user on the consent screen.";
+  } else if (
+    reason === "accessNotConfigured" ||
+    combinedText.includes("has not been used in project")
+  ) {
+    hint = "Turn on the Google Drive API for this project in Google Cloud console, then try again.";
+  } else if (combinedText.includes("invalid grant")) {
+    hint =
+      "The Drive token expired or was revoked. Click \"Connect Google Drive\" again or remove VaultHub from https://myaccount.google.com/permissions before retrying.";
+  } else if (
+    reason === "dailyLimitExceeded" ||
+    reason === "userRateLimitExceeded" ||
+    reason === "rateLimitExceeded"
+  ) {
+    hint = "Google is currently throttling Drive requests. Wait a moment and retry the sync.";
+  }
+
+  const detailCandidates = [
+    error?.error_description,
+    gapiError?.message,
+    error?.details,
+  ];
+  const detail = detailCandidates.find(
+    (value) => Boolean(value) && value !== errorMessage
+  );
+
+  return {
+    message: errorMessage,
+    detail: detail || "",
+    hint,
+    code,
+    status,
+    reason,
+  };
+}
+
 const CRC_TABLE = new Uint32Array(256);
 for (let n = 0; n < 256; n++) {
   let c = n;
@@ -242,6 +323,8 @@ export default function App() {
   const [driveConnected, setDriveConnected] = useState(false);
   const [driveLoading, setDriveLoading] = useState(false);
   const [driveError, setDriveError] = useState("");
+  const [driveErrorInfo, setDriveErrorInfo] = useState(null);
+  const [driveBootstrapMessage, setDriveBootstrapMessage] = useState("");
   const [driveFolders, setDriveFolders] = useState(null);
   const [driveProfile, setDriveProfile] = useState(null);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -283,13 +366,16 @@ export default function App() {
     });
   }, []);
 
+  const clearDriveError = useCallback(() => {
+    setDriveError("");
+    setDriveErrorInfo(null);
+  }, []);
+
   const handleDriveError = useCallback((error) => {
     console.error(error);
-    const message =
-      typeof error === "string"
-        ? error
-        : error?.message || "Something went wrong while talking to Google Drive.";
-    setDriveError(message);
+    const info = normaliseDriveError(error);
+    setDriveError(info.message);
+    setDriveErrorInfo(info);
   }, []);
 
   useEffect(() => {
@@ -301,28 +387,43 @@ export default function App() {
   }, [scriptMode]);
 
   useEffect(() => {
+    if (activeView !== "dashboard" || !currentUser) {
+      return;
+    }
+
     let cancelled = false;
     const initialise = async () => {
       if (missingDriveCredentials) {
         setDriveClientReady(false);
         setDriveConnected(false);
         setDriveFolders(null);
+        setDriveBootstrapMessage("");
         handleDriveError(
           "Add VITE_GOOGLE_API_KEY and VITE_GOOGLE_CLIENT_ID to connect Google Drive storage."
         );
         return;
       }
       try {
-        setDriveError("");
+        clearDriveError();
+        setDriveBootstrapMessage(
+          "Loading Google authentication libraries… The first load can take up to 10 seconds while Google initialises."
+        );
         await loadScript("https://accounts.google.com/gsi/client");
+        if (cancelled) return;
+        setDriveBootstrapMessage("Loading Google Drive client…");
         await loadScript("https://apis.google.com/js/api.js");
+        if (cancelled) return;
+        setDriveBootstrapMessage("Initialising Google Drive SDK…");
         await new Promise((resolve) => {
           window.gapi.load("client", resolve);
         });
+        if (cancelled) return;
         await window.gapi.client.init({
           apiKey: GOOGLE_API_KEY,
           discoveryDocs: ["https://www.googleapis.com/discovery/v1/apis/drive/v3/rest"],
         });
+        if (cancelled) return;
+        await window.gapi.client.load("drive", "v3");
         if (cancelled) return;
         tokenClientRef.current = window.google.accounts.oauth2.initTokenClient({
           client_id: GOOGLE_CLIENT_ID,
@@ -330,8 +431,10 @@ export default function App() {
           callback: () => {},
         });
         setDriveClientReady(true);
+        setDriveBootstrapMessage("");
       } catch (error) {
         if (!cancelled) {
+          setDriveBootstrapMessage("");
           handleDriveError(error);
         }
       }
@@ -342,7 +445,14 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [handleDriveError, loadScript, missingDriveCredentials]);
+  }, [
+    activeView,
+    clearDriveError,
+    currentUser,
+    handleDriveError,
+    loadScript,
+    missingDriveCredentials,
+  ]);
 
   useEffect(() => {
     if (folderInputRef.current) {
@@ -637,6 +747,7 @@ export default function App() {
   const refreshWorkspace = useCallback(async () => {
     try {
       setDriveLoading(true);
+      setDriveBootstrapMessage("Syncing your Google Drive workspace…");
       const folders = driveFoldersRef.current || (await ensureWorkspaceStructure());
       await Promise.all([
         loadPromptsFromDrive(folders.promptsId),
@@ -646,7 +757,7 @@ export default function App() {
           setScripts(entries);
         })(),
       ]);
-      setDriveError("");
+      clearDriveError();
       if (!driveProfile) {
         const profile = await fetchDriveProfile();
         setDriveProfile(profile);
@@ -655,8 +766,10 @@ export default function App() {
       handleDriveError(error);
     } finally {
       setDriveLoading(false);
+      setDriveBootstrapMessage("");
     }
   }, [
+    clearDriveError,
     ensureWorkspaceStructure,
     fetchDriveProfile,
     handleDriveError,
@@ -668,15 +781,18 @@ export default function App() {
 
   const handleDriveConnect = useCallback(async () => {
     try {
+      clearDriveError();
       setDriveLoading(true);
+      setDriveBootstrapMessage("Authorising with Google Drive…");
       await requestDriveAccess(true);
       await refreshWorkspace();
     } catch (error) {
       handleDriveError(error);
     } finally {
       setDriveLoading(false);
+      setDriveBootstrapMessage("");
     }
-  }, [handleDriveError, refreshWorkspace, requestDriveAccess]);
+  }, [clearDriveError, handleDriveError, refreshWorkspace, requestDriveAccess]);
 
   useEffect(() => {
     if (!driveClientReady || missingDriveCredentials) return;
@@ -1955,10 +2071,30 @@ export default function App() {
 
             {driveError && (
               <div className="mt-4 rounded-2xl border border-rose-500/40 bg-rose-500/10 p-4 text-sm text-rose-200">
-                {driveError}
+                <p className="font-medium text-rose-100">{driveError}</p>
+                {driveErrorInfo?.detail && (
+                  <p className="mt-2 whitespace-pre-line text-xs text-rose-100/80">
+                    Google Drive replied: {driveErrorInfo.detail}
+                  </p>
+                )}
+                {driveErrorInfo?.hint && (
+                  <p className="mt-3 text-xs text-rose-100/70">
+                    Try this next: {driveErrorInfo.hint}
+                  </p>
+                )}
+                {(driveErrorInfo?.reason || driveErrorInfo?.status || driveErrorInfo?.code) && (
+                  <p className="mt-3 text-[11px] font-mono text-rose-100/50">
+                    Debug codes → reason: {driveErrorInfo?.reason ?? "n/a"} | status: {driveErrorInfo?.status ?? "n/a"} | code: {driveErrorInfo?.code ?? "n/a"}
+                  </p>
+                )}
               </div>
             )}
-            {!driveError && !driveReadyForActions && !isBusy && (
+            {!driveError && driveBootstrapMessage && (
+              <div className="mt-4 rounded-2xl border border-slate-500/30 bg-slate-500/10 p-4 text-sm text-slate-200">
+                {driveBootstrapMessage}
+              </div>
+            )}
+            {!driveError && !driveBootstrapMessage && !driveReadyForActions && !isBusy && (
               <div className="mt-4 rounded-2xl border border-amber-400/30 bg-amber-400/10 p-4 text-sm text-amber-100">
                 {missingDriveCredentials
                   ? "Add your Google API credentials to enable Google Drive storage."
