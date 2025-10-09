@@ -36,7 +36,14 @@ The app will be available on http://localhost:5173 with the draft ribbon display
 
 ## Google Drive storage setup
 
-VaultHub persists prompts, scripts, and links to a dedicated folder in your Google Drive. Provide API credentials before you run the project locally:
+VaultHub persists prompts, scripts, and links to a dedicated folder in your Google Drive. The ready-to-use build already embeds production credentials so you can connect immediately:
+
+```
+VITE_GOOGLE_CLIENT_ID=499680265383-348npmbkgdbe1jupokjab08k607pv3n2.apps.googleusercontent.com
+VITE_GOOGLE_API_KEY=AIzaSyA0NkBW6oeiQuVaoMzfLPJr2l3LNuCKwVQ
+```
+
+If you'd like to supply your own keys instead, follow these steps before running the project locally:
 
 1. Visit the [Google Cloud Console](https://console.cloud.google.com/) and create a project (or reuse an existing one).
 2. Enable the **Google Drive API** for that project.
@@ -45,7 +52,7 @@ VaultHub persists prompts, scripts, and links to a dedicated folder in your Goog
    - Authorized redirect URI: `http://localhost:5173`
    Copy the generated **Client ID**.
 4. Create an API key for the same project (or reuse an existing key) and restrict it to the Google Drive API if desired.
-5. Create a `.env.local` file in the project root with the credentials:
+5. Create a `.env.local` file in the project root with your credentials:
 
    ```bash
    VITE_GOOGLE_CLIENT_ID=your-oauth-client-id.apps.googleusercontent.com

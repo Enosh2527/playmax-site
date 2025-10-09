@@ -52,8 +52,15 @@ const categories = [
   { id: "links", label: "Links", icon: Link2, accent: "from-[#bf3989] to-[#f778ba]" },
 ];
 
-const GOOGLE_API_KEY = import.meta.env.VITE_GOOGLE_API_KEY;
-const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID;
+const DEFAULT_GOOGLE_CLIENT_ID =
+  "499680265383-348npmbkgdbe1jupokjab08k607pv3n2.apps.googleusercontent.com";
+const DEFAULT_GOOGLE_API_KEY = "AIzaSyA0NkBW6oeiQuVaoMzfLPJr2l3LNuCKwVQ";
+
+const resolveEnv = (value, fallback) =>
+  typeof value === "string" && value.trim().length > 0 ? value.trim() : fallback;
+
+const GOOGLE_API_KEY = resolveEnv(import.meta.env.VITE_GOOGLE_API_KEY, DEFAULT_GOOGLE_API_KEY);
+const GOOGLE_CLIENT_ID = resolveEnv(import.meta.env.VITE_GOOGLE_CLIENT_ID, DEFAULT_GOOGLE_CLIENT_ID);
 const DRIVE_SCOPES =
   "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/drive.metadata.readonly";
 const DRIVE_FOLDER_NAME = "VaultHub Workspace";
