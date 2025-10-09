@@ -61,6 +61,14 @@ If you'd like to supply your own keys instead, follow these steps before running
 
 6. Restart the dev server (`npm run dev`). Once you log in to the dashboard, click **Connect Google Drive** to authorize the app. A folder named **VaultHub Workspace** will be created automatically with Prompts, Scripts, and Links subfolders for storing your uploads.
 
+## Browser vault storage (zero-cost alternative)
+
+If you're running into repeated Drive authorization errors or simply want a private workspace, switch the **Workspace vault** toggle to **Browser vault**. This mode keeps every prompt, script, and link inside the current browser via `localStorage`, so no Google Cloud setup is required.
+
+- The browser vault is enabled by default for new visitors. Use the toggle in the dashboard header to hop back to Google Drive whenever you're ready to sync across accounts.
+- Data never leaves the device. Each browser profile gets its own vault; clear it by opening the developer console and running `localStorage.removeItem('vaulthub-local-workspace-v1')`.
+- Bulk downloads, folder uploads, context actions, and previews behave identically to Drive mode—the app compresses the locally stored bytes into ZIP files on demand when you download.
+
 ### Fixing the `redirect_uri_mismatch` error
 
 If Google blocks the popup with a `redirect_uri_mismatch` message, it means the current site URL hasn't been registered on the OAuth client. Grab the exact origin from your browser's address bar (for example `https://652c1a57ab3a12345--playmax.netlify.app`) and add it to the **Authorized JavaScript origins** list for the Drive OAuth credentials. Save the change, wait a few seconds for it to propagate, then try connecting again.

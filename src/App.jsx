@@ -71,6 +71,94 @@ const textEncoder = new TextEncoder();
 
 const DEFAULT_DRIVE_ERROR_MESSAGE = "Something went wrong while talking to Google Drive.";
 
+const STORAGE_MODES = {
+  DRIVE: "drive",
+  LOCAL: "local",
+};
+
+const STORAGE_MODE_KEY = "vaulthub-storage-mode";
+const LOCAL_WORKSPACE_KEY = "vaulthub-local-workspace-v1";
+
+function readLocalWorkspace() {
+  if (typeof window === "undefined") {
+    return { prompts: [], links: [], scripts: [] };
+  }
+
+  try {
+    const raw = window.localStorage.getItem(LOCAL_WORKSPACE_KEY);
+    if (!raw) {
+      return { prompts: [], links: [], scripts: [] };
+    }
+    const parsed = JSON.parse(raw);
+    return {
+      prompts: Array.isArray(parsed?.prompts) ? parsed.prompts : [],
+      links: Array.isArray(parsed?.links) ? parsed.links : [],
+      scripts: Array.isArray(parsed?.scripts) ? parsed.scripts : [],
+    };
+  } catch (error) {
+    console.warn("Failed to read local VaultHub workspace", error);
+    return { prompts: [], links: [], scripts: [] };
+  }
+}
+
+function writeLocalWorkspace(workspace) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    const payload = {
+      prompts: Array.isArray(workspace?.prompts) ? workspace.prompts : [],
+      links: Array.isArray(workspace?.links) ? workspace.links : [],
+      scripts: Array.isArray(workspace?.scripts) ? workspace.scripts : [],
+    };
+    window.localStorage.setItem(LOCAL_WORKSPACE_KEY, JSON.stringify(payload));
+  } catch (error) {
+    console.error("Failed to persist local VaultHub workspace", error);
+  }
+}
+
+function arrayBufferToBase64(buffer) {
+  if (typeof window === "undefined" && typeof Buffer !== "undefined") {
+    return Buffer.from(buffer).toString("base64");
+  }
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  if (typeof window !== "undefined" && typeof window.btoa === "function") {
+    return window.btoa(binary);
+  }
+  if (typeof globalThis !== "undefined" && typeof globalThis.btoa === "function") {
+    return globalThis.btoa(binary);
+  }
+  throw new Error("Base64 encoding is not supported in this environment.");
+}
+
+function base64ToUint8Array(base64) {
+  if (!base64) {
+    return new Uint8Array(0);
+  }
+  if (typeof window === "undefined" && typeof Buffer !== "undefined") {
+    return new Uint8Array(Buffer.from(base64, "base64"));
+  }
+  const decoder =
+    (typeof window !== "undefined" && window.atob) ||
+    (typeof globalThis !== "undefined" && globalThis.atob);
+  if (!decoder) {
+    throw new Error("Base64 decoding is not supported in this environment.");
+  }
+  const binary = decoder(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
 function normaliseDriveError(error) {
   if (!error) {
     return { message: DEFAULT_DRIVE_ERROR_MESSAGE };
@@ -322,6 +410,19 @@ export default function App() {
   const [authView, setAuthView] = useState("login");
   const [authError, setAuthError] = useState("");
 
+  const [storageMode, setStorageMode] = useState(() => {
+    if (typeof window === "undefined") {
+      return STORAGE_MODES.LOCAL;
+    }
+    const stored = window.localStorage.getItem(STORAGE_MODE_KEY);
+    if (stored === STORAGE_MODES.DRIVE || stored === STORAGE_MODES.LOCAL) {
+      return stored;
+    }
+    return STORAGE_MODES.LOCAL;
+  });
+  const storageModeRef = useRef(storageMode);
+  const localWorkspaceRef = useRef({ prompts: [], links: [], scripts: [] });
+
   const missingDriveCredentials = !GOOGLE_API_KEY || !GOOGLE_CLIENT_ID;
   const [driveClientReady, setDriveClientReady] = useState(false);
   const [driveConnected, setDriveConnected] = useState(false);
@@ -354,6 +455,54 @@ export default function App() {
   const tokenClientRef = useRef(null);
   const driveFoldersRef = useRef(null);
 
+  useEffect(() => {
+    storageModeRef.current = storageMode;
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(STORAGE_MODE_KEY, storageMode);
+    }
+  }, [storageMode]);
+
+  useEffect(() => {
+    if (storageMode === STORAGE_MODES.LOCAL) {
+      const workspace = readLocalWorkspace();
+      localWorkspaceRef.current = workspace;
+      setPrompts(workspace.prompts || []);
+      setLinks(workspace.links || []);
+      setScripts(workspace.scripts || []);
+      setDriveError("");
+      setDriveErrorInfo(null);
+      setDriveBootstrapMessage("");
+      setDriveClientReady(false);
+      setDriveConnected(false);
+      setDriveFolders(null);
+      driveFoldersRef.current = null;
+      setDriveProfile(null);
+    }
+    if (storageMode === STORAGE_MODES.DRIVE) {
+      localWorkspaceRef.current = { prompts: [], links: [], scripts: [] };
+      setPrompts([]);
+      setLinks([]);
+      setScripts([]);
+      driveFoldersRef.current = null;
+    }
+    setSelectedItems([]);
+    setPreview(null);
+    setCurrentScriptFolderId(null);
+  }, [storageMode]);
+
+  useEffect(() => {
+    if (storageMode !== STORAGE_MODES.LOCAL) {
+      return;
+    }
+    const workspace = {
+      prompts,
+      links,
+      scripts,
+    };
+    localWorkspaceRef.current = workspace;
+    writeLocalWorkspace(workspace);
+  }, [storageMode, prompts, links, scripts]);
+
   const loadScript = useCallback((src) => {
     return new Promise((resolve, reject) => {
       if (document.querySelector(`script[src="${src}"]`)) {
@@ -382,6 +531,16 @@ export default function App() {
     setDriveErrorInfo(info);
   }, []);
 
+  const handleLocalError = useCallback((error, fallbackMessage) => {
+    console.error(error);
+    setDriveError(
+      error?.message ||
+        fallbackMessage ||
+        "Something went wrong while saving to your browser vault."
+    );
+    setDriveErrorInfo(null);
+  }, []);
+
   useEffect(() => {
     if (scriptMode === "file") {
       setScriptFolderFiles([]);
@@ -391,6 +550,9 @@ export default function App() {
   }, [scriptMode]);
 
   useEffect(() => {
+    if (storageMode !== STORAGE_MODES.DRIVE) {
+      return;
+    }
     if (activeView !== "dashboard" || !currentUser) {
       return;
     }
@@ -456,6 +618,7 @@ export default function App() {
     handleDriveError,
     loadScript,
     missingDriveCredentials,
+    storageMode,
   ]);
 
   useEffect(() => {
@@ -881,6 +1044,9 @@ export default function App() {
   );
 
   const refreshWorkspace = useCallback(async () => {
+    if (storageMode !== STORAGE_MODES.DRIVE) {
+      return;
+    }
     try {
       setDriveLoading(true);
       setDriveBootstrapMessage("Syncing your Google Drive workspace…");
@@ -913,9 +1079,13 @@ export default function App() {
     loadPromptsFromDrive,
     loadScriptsFromDrive,
     driveProfile,
+    storageMode,
   ]);
 
   const handleDriveConnect = useCallback(async () => {
+    if (storageMode !== STORAGE_MODES.DRIVE) {
+      return;
+    }
     try {
       clearDriveError();
       setDriveLoading(true);
@@ -928,16 +1098,29 @@ export default function App() {
       setDriveLoading(false);
       setDriveBootstrapMessage("");
     }
-  }, [clearDriveError, handleDriveError, refreshWorkspace, requestDriveAccess]);
+  }, [
+    clearDriveError,
+    handleDriveError,
+    refreshWorkspace,
+    requestDriveAccess,
+    storageMode,
+  ]);
 
   useEffect(() => {
+    if (storageMode !== STORAGE_MODES.DRIVE) return;
     if (!driveClientReady || missingDriveCredentials) return;
     const token = window.gapi?.client?.getToken?.();
     if (token?.access_token && !driveConnected) {
       setDriveConnected(true);
       refreshWorkspace();
     }
-  }, [driveClientReady, driveConnected, missingDriveCredentials, refreshWorkspace]);
+  }, [
+    driveClientReady,
+    driveConnected,
+    missingDriveCredentials,
+    refreshWorkspace,
+    storageMode,
+  ]);
 
   const scriptsById = useMemo(() => {
     const map = new Map();
@@ -971,7 +1154,10 @@ export default function App() {
   );
 
   const driveReadyForActions = driveConnected && Boolean(driveFolders);
-  const isBusy = isProcessing || driveLoading;
+  const usingDrive = storageMode === STORAGE_MODES.DRIVE;
+  const usingLocal = !usingDrive;
+  const storageReadyForActions = usingDrive ? driveReadyForActions : true;
+  const isBusy = isProcessing || (usingDrive ? driveLoading : false);
 
   const handleAuth = (event) => {
     event.preventDefault();
@@ -1020,10 +1206,6 @@ export default function App() {
   const handleAddPrompt = async (event) => {
     event.preventDefault();
     if (!currentUser) return;
-    if (!driveFolders?.promptsId) {
-      handleDriveError("Connect Google Drive before saving prompts.");
-      return;
-    }
     const form = new FormData(event.currentTarget);
     const name = String(form.get("name") || "").trim();
     const description = String(form.get("description") || "").trim();
@@ -1038,6 +1220,28 @@ export default function App() {
       uploaderEmail: currentUser.email,
       createdAt,
     };
+
+    if (storageMode === STORAGE_MODES.LOCAL) {
+      try {
+        setIsProcessing(true);
+        clearDriveError();
+        const entry = { ...payload, id: crypto.randomUUID() };
+        setPrompts((prev) =>
+          [...prev, entry].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
+        );
+        event.currentTarget.reset();
+      } catch (error) {
+        handleLocalError(error, "Failed to store the prompt locally. Try again.");
+      } finally {
+        setIsProcessing(false);
+      }
+      return;
+    }
+
+    if (!driveFolders?.promptsId) {
+      handleDriveError("Connect Google Drive before saving prompts.");
+      return;
+    }
     try {
       setIsProcessing(true);
       await ensureDriveToken();
@@ -1074,10 +1278,6 @@ export default function App() {
   const handleAddLink = async (event) => {
     event.preventDefault();
     if (!currentUser) return;
-    if (!driveFolders?.linksId) {
-      handleDriveError("Connect Google Drive before saving links.");
-      return;
-    }
     const form = new FormData(event.currentTarget);
     const name = String(form.get("name") || "").trim();
     const url = String(form.get("url") || "").trim();
@@ -1092,6 +1292,28 @@ export default function App() {
       uploaderEmail: currentUser.email,
       createdAt,
     };
+
+    if (storageMode === STORAGE_MODES.LOCAL) {
+      try {
+        setIsProcessing(true);
+        clearDriveError();
+        const entry = { ...payload, id: crypto.randomUUID() };
+        setLinks((prev) =>
+          [...prev, entry].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
+        );
+        event.currentTarget.reset();
+      } catch (error) {
+        handleLocalError(error, "Failed to store the link locally. Try again.");
+      } finally {
+        setIsProcessing(false);
+      }
+      return;
+    }
+
+    if (!driveFolders?.linksId) {
+      handleDriveError("Connect Google Drive before saving links.");
+      return;
+    }
     try {
       setIsProcessing(true);
       await ensureDriveToken();
@@ -1128,16 +1350,121 @@ export default function App() {
   const handleAddScript = async (event) => {
     event.preventDefault();
     if (!currentUser) return;
-    if (!driveFolders?.scriptsId) {
-      handleDriveError("Connect Google Drive before uploading scripts.");
-      return;
-    }
     const formData = new FormData(event.currentTarget);
     const name = String(formData.get("name") || "").trim();
     const notes = String(formData.get("notes") || "").trim();
     const createdAt = new Date().toISOString();
-    const parentDriveId = currentScriptFolderId ?? driveFolders.scriptsId;
+    const parentDriveId = currentScriptFolderId ?? driveFolders?.scriptsId;
     const parentLogicalId = currentScriptFolderId ?? null;
+
+    if (storageMode === STORAGE_MODES.LOCAL) {
+      try {
+        setIsProcessing(true);
+        clearDriveError();
+        if (scriptMode === "file") {
+          if (!scriptFiles.length) return;
+          const file = scriptFiles[0];
+          const buffer = await file.arrayBuffer();
+          const entry = {
+            id: crypto.randomUUID(),
+            type: "file",
+            name: name || file.name,
+            originalName: file.name,
+            mimeType: file.type || "application/octet-stream",
+            size: Number(file.size || 0),
+            notes,
+            uploader: currentUser.name,
+            uploaderEmail: currentUser.email,
+            createdAt,
+            parentId: parentLogicalId,
+            content: arrayBufferToBase64(buffer),
+          };
+          setScripts((prev) => [...prev, entry]);
+          setScriptFiles([]);
+          event.currentTarget.reset();
+          return;
+        }
+
+        if (!scriptFolderFiles.length) return;
+        const files = Array.from(scriptFolderFiles);
+        const defaultRootName = files[0]?.webkitRelativePath?.split("/")[0] || "Folder";
+        const rootId = crypto.randomUUID();
+        const rootEntry = {
+          id: rootId,
+          type: "folder",
+          name: name || defaultRootName,
+          notes,
+          uploader: currentUser.name,
+          uploaderEmail: currentUser.email,
+          createdAt,
+          parentId: parentLogicalId,
+        };
+        const createdItems = [rootEntry];
+        const pathToFolderId = new Map();
+        pathToFolderId.set("", rootId);
+
+        for (const file of files) {
+          const rawPath = file.webkitRelativePath || file.name;
+          const parts = rawPath.split("/");
+          if (parts.length > 1) {
+            parts.shift();
+          }
+          const fileName = parts.pop() || file.name;
+          let currentPath = "";
+          for (const segment of parts) {
+            currentPath = currentPath ? `${currentPath}/${segment}` : segment;
+            if (!pathToFolderId.has(currentPath)) {
+              const folderId = crypto.randomUUID();
+              const parentPath = currentPath.split("/").slice(0, -1).join("/");
+              const folderParentId = parentPath ? pathToFolderId.get(parentPath) : rootId;
+              const folderEntry = {
+                id: folderId,
+                type: "folder",
+                name: segment,
+                notes,
+                uploader: currentUser.name,
+                uploaderEmail: currentUser.email,
+                createdAt,
+                parentId: folderParentId,
+              };
+              pathToFolderId.set(currentPath, folderId);
+              createdItems.push(folderEntry);
+            }
+          }
+          const parentPathKey = parts.join("/");
+          const folderId = parentPathKey ? pathToFolderId.get(parentPathKey) : rootId;
+          const buffer = await file.arrayBuffer();
+          const fileEntry = {
+            id: crypto.randomUUID(),
+            type: "file",
+            name: fileName,
+            originalName: file.name,
+            mimeType: file.type || "application/octet-stream",
+            size: Number(file.size || 0),
+            notes,
+            uploader: currentUser.name,
+            uploaderEmail: currentUser.email,
+            createdAt,
+            parentId: folderId,
+            content: arrayBufferToBase64(buffer),
+          };
+          createdItems.push(fileEntry);
+        }
+        setScripts((prev) => [...prev, ...createdItems]);
+        setScriptFolderFiles([]);
+        event.currentTarget.reset();
+      } catch (error) {
+        handleLocalError(error, "Failed to store the scripts locally. Try again.");
+      } finally {
+        setIsProcessing(false);
+      }
+      return;
+    }
+
+    if (!driveFolders?.scriptsId) {
+      handleDriveError("Connect Google Drive before uploading scripts.");
+      return;
+    }
 
     try {
       setIsProcessing(true);
@@ -1327,6 +1654,27 @@ export default function App() {
   const handleDelete = async (category, id) => {
     try {
       setIsProcessing(true);
+      if (storageMode === STORAGE_MODES.LOCAL) {
+        clearDriveError();
+        if (category === "prompts") {
+          setPrompts((prev) => prev.filter((item) => item.id !== id));
+          setSelectedItems((prev) => prev.filter((item) => !(item.category === category && item.id === id)));
+          setPreview((prevPreview) =>
+            prevPreview && prevPreview.category === category && prevPreview.item.id === id ? null : prevPreview
+          );
+          return;
+        }
+        if (category === "links") {
+          setLinks((prev) => prev.filter((item) => item.id !== id));
+          setSelectedItems((prev) => prev.filter((item) => !(item.category === category && item.id === id)));
+          setPreview((prevPreview) =>
+            prevPreview && prevPreview.category === category && prevPreview.item.id === id ? null : prevPreview
+          );
+          return;
+        }
+        removeScriptItem(id);
+        return;
+      }
       await ensureDriveToken();
       await window.gapi.client.drive.files.delete({ fileId: id });
       if (category === "prompts") {
@@ -1347,7 +1695,11 @@ export default function App() {
       }
       removeScriptItem(id);
     } catch (error) {
-      handleDriveError(error);
+      if (storageMode === STORAGE_MODES.LOCAL) {
+        handleLocalError(error, "Failed to delete the item from your browser vault. Try again.");
+      } else {
+        handleDriveError(error);
+      }
     } finally {
       setIsProcessing(false);
     }
@@ -1368,6 +1720,22 @@ export default function App() {
       const entries = [];
       const pathSegments = [...prefixSegments, item.name];
       if (item.type === "folder") {
+        if (storageMode === STORAGE_MODES.LOCAL) {
+          entries.push({
+            path: `${pathSegments.join("/")}/`,
+            data: new Uint8Array(0),
+            crc: 0,
+            isDirectory: true,
+            date: new Date(item.createdAt),
+            externalAttr: 0x10 << 16,
+          });
+          const children = scripts.filter((child) => child.parentId === item.id);
+          for (const child of children) {
+            const childEntries = await gatherScriptEntries(child, pathSegments);
+            entries.push(...childEntries);
+          }
+          return entries;
+        }
         entries.push({
           path: `${pathSegments.join("/")}/`,
           data: new Uint8Array(0),
@@ -1383,19 +1751,29 @@ export default function App() {
         }
         return entries;
       }
-      const response = await driveApiFetch(
-        `https://www.googleapis.com/drive/v3/files/${item.id}?alt=media`
-      );
-      const buffer = new Uint8Array(await response.arrayBuffer());
-      entries.push({
-        path: pathSegments.join("/"),
-        data: buffer,
-        crc: crc32(buffer),
-        date: new Date(item.createdAt),
-      });
+      if (storageMode === STORAGE_MODES.LOCAL) {
+        const buffer = base64ToUint8Array(item.content);
+        entries.push({
+          path: pathSegments.join("/"),
+          data: buffer,
+          crc: crc32(buffer),
+          date: new Date(item.createdAt),
+        });
+      } else {
+        const response = await driveApiFetch(
+          `https://www.googleapis.com/drive/v3/files/${item.id}?alt=media`
+        );
+        const buffer = new Uint8Array(await response.arrayBuffer());
+        entries.push({
+          path: pathSegments.join("/"),
+          data: buffer,
+          crc: crc32(buffer),
+          date: new Date(item.createdAt),
+        });
+      }
       return entries;
     },
-    [driveApiFetch, scripts]
+    [driveApiFetch, scripts, storageMode]
   );
 
   const handleDownload = async (category, item) => {
@@ -1412,18 +1790,28 @@ export default function App() {
         return;
       }
       if (item.type === "file") {
-        const response = await driveApiFetch(
-          `https://www.googleapis.com/drive/v3/files/${item.id}?alt=media`
-        );
-        const blob = await response.blob();
-        downloadBlob(blob, item.name);
+        if (storageMode === STORAGE_MODES.LOCAL) {
+          const buffer = base64ToUint8Array(item.content);
+          const blob = new Blob([buffer], { type: item.mimeType || "application/octet-stream" });
+          downloadBlob(blob, item.name);
+        } else {
+          const response = await driveApiFetch(
+            `https://www.googleapis.com/drive/v3/files/${item.id}?alt=media`
+          );
+          const blob = await response.blob();
+          downloadBlob(blob, item.name);
+        }
         return;
       }
       const entries = await gatherScriptEntries(item);
       const zip = createZip(entries);
       downloadBlob(zip, `${safeFileName(item.name)}.zip`);
     } catch (error) {
-      handleDriveError(error);
+      if (storageMode === STORAGE_MODES.LOCAL) {
+        handleLocalError(error, "Failed to download from your browser vault. Try again.");
+      } else {
+        handleDriveError(error);
+      }
     } finally {
       setIsProcessing(false);
     }
@@ -1473,10 +1861,15 @@ export default function App() {
       const script = scriptsById.get(id);
       if (!script) continue;
       if (script.type === "file") {
-        const response = await driveApiFetch(
-          `https://www.googleapis.com/drive/v3/files/${script.id}?alt=media`
-        );
-        const buffer = new Uint8Array(await response.arrayBuffer());
+        let buffer;
+        if (storageMode === STORAGE_MODES.LOCAL) {
+          buffer = base64ToUint8Array(script.content);
+        } else {
+          const response = await driveApiFetch(
+            `https://www.googleapis.com/drive/v3/files/${script.id}?alt=media`
+          );
+          buffer = new Uint8Array(await response.arrayBuffer());
+        }
         addEntry({
           path: ["Scripts", ...scriptPath(script)].join("/"),
           data: buffer,
@@ -1498,6 +1891,7 @@ export default function App() {
     prompts,
     scriptsById,
     selectedItems,
+    storageMode,
   ]);
 
   const handleBulkDownload = async () => {
@@ -1509,7 +1903,11 @@ export default function App() {
       const zip = createZip(entries);
       downloadBlob(zip, `vault-bulk-download-${Date.now()}.zip`);
     } catch (error) {
-      handleDriveError(error);
+      if (storageMode === STORAGE_MODES.LOCAL) {
+        handleLocalError(error, "Failed to bundle the download from your browser vault. Try again.");
+      } else {
+        handleDriveError(error);
+      }
     } finally {
       setIsProcessing(false);
     }
@@ -1525,6 +1923,70 @@ export default function App() {
 
     try {
       setIsProcessing(true);
+      if (storageMode === STORAGE_MODES.LOCAL) {
+        clearDriveError();
+        if (editingItem.category === "prompts") {
+          const description = String(form.get("description") || "").trim();
+          setPrompts((prev) =>
+            prev.map((entry) =>
+              entry.id === editingItem.item.id ? { ...entry, name, description, notes } : entry
+            )
+          );
+          setPreview((prevPreview) => {
+            if (!prevPreview || prevPreview.category !== "prompts" || prevPreview.item.id !== editingItem.item.id) {
+              return prevPreview;
+            }
+            return {
+              ...prevPreview,
+              item: { ...prevPreview.item, name, description, notes },
+            };
+          });
+        } else if (editingItem.category === "links") {
+          const url = String(form.get("url") || "").trim();
+          setLinks((prev) =>
+            prev.map((entry) => (entry.id === editingItem.item.id ? { ...entry, name, url, notes } : entry))
+          );
+          setPreview((prevPreview) => {
+            if (!prevPreview || prevPreview.category !== "links" || prevPreview.item.id !== editingItem.item.id) {
+              return prevPreview;
+            }
+            return {
+              ...prevPreview,
+              item: { ...prevPreview.item, name, url, notes },
+            };
+          });
+        } else if (editingItem.category === "scripts") {
+          setScripts((prev) =>
+            prev.map((entry) =>
+              entry.id === editingItem.item.id
+                ? {
+                    ...entry,
+                    name,
+                    notes,
+                    ...(entry.type === "file" ? { originalName: name } : {}),
+                  }
+                : entry
+            )
+          );
+          setPreview((prevPreview) => {
+            if (!prevPreview || prevPreview.category !== "scripts" || prevPreview.item.id !== editingItem.item.id) {
+              return prevPreview;
+            }
+            return {
+              ...prevPreview,
+              item: {
+                ...prevPreview.item,
+                name,
+                notes,
+                ...(prevPreview.item.type === "file" ? { originalName: name } : {}),
+              },
+            };
+          });
+        }
+        setEditingItem(null);
+        return;
+      }
+
       await ensureDriveToken();
 
       if (editingItem.category === "prompts") {
@@ -1633,7 +2095,11 @@ export default function App() {
 
       setEditingItem(null);
     } catch (error) {
-      handleDriveError(error);
+      if (storageMode === STORAGE_MODES.LOCAL) {
+        handleLocalError(error, "Failed to update the item in your browser vault. Try again.");
+      } else {
+        handleDriveError(error);
+      }
     } finally {
       setIsProcessing(false);
     }
@@ -1709,7 +2175,7 @@ export default function App() {
         className="fixed z-50 w-44 overflow-hidden rounded-lg border border-white/10 bg-[#161b22] shadow-2xl"
       >
         <button
-          disabled={isBusy || !driveReadyForActions}
+          disabled={isBusy || !storageReadyForActions}
           onClick={async () => {
             await handleDownload(contextMenu.category, contextMenu.item);
             setContextMenu(null);
@@ -1719,7 +2185,7 @@ export default function App() {
           <Download className="h-4 w-4" /> Download
         </button>
         <button
-          disabled={isBusy || !driveReadyForActions}
+          disabled={isBusy || !storageReadyForActions}
           onClick={() => {
             setEditingItem({ category: contextMenu.category, item: contextMenu.item });
             setContextMenu(null);
@@ -1729,7 +2195,7 @@ export default function App() {
           <PencilLine className="h-4 w-4" /> Edit
         </button>
         <button
-          disabled={isBusy || !driveReadyForActions}
+          disabled={isBusy || !storageReadyForActions}
           onClick={async () => {
             await handleDelete(contextMenu.category, contextMenu.item.id);
             setContextMenu(null);
@@ -1861,7 +2327,7 @@ export default function App() {
           <div className="flex flex-wrap items-center gap-2">
             <Button
               onClick={async () => handleDownload(category, item)}
-              disabled={isBusy || !driveReadyForActions}
+              disabled={isBusy || !storageReadyForActions}
               className="bg-[#1f6feb] text-white hover:bg-[#388bfd] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
             >
               <Download className="mr-2 h-4 w-4" /> Download
@@ -2172,34 +2638,60 @@ export default function App() {
                   <p className="text-sm text-slate-400">Double-click folders to open them, right-click items for quick actions.</p>
                 </div>
               </div>
-              <div className="flex flex-wrap items-center gap-3 text-sm">
-                <Button
-                  onClick={() => handleDriveConnect()}
-                  disabled={!driveClientReady || missingDriveCredentials || isBusy}
-                  className={`${
-                    driveConnected
-                      ? "border border-white/10 bg-white/5 text-white hover:bg-white/10"
-                      : "bg-[#1f6feb] text-white hover:bg-[#388bfd]"
-                  } disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500`}
+            <div className="flex flex-wrap items-center gap-3 text-sm">
+              <div className="flex items-center gap-1 rounded-full border border-white/10 bg-white/5 p-1 text-xs">
+                <button
+                  onClick={() => setStorageMode(STORAGE_MODES.DRIVE)}
+                  className={`rounded-full px-3 py-1 font-medium transition ${
+                    usingDrive ? "bg-[#1f6feb] text-white" : "text-slate-300 hover:bg-white/10"
+                  }`}
                 >
-                  <HardDrive className="mr-2 h-4 w-4" />
-                  {isBusy
-                    ? "Syncing..."
-                    : driveConnected
-                    ? "Refresh Drive"
-                    : "Connect Google Drive"}
-                </Button>
-                {driveProfile && (
-                  <span className="text-xs text-slate-400">
-                    Connected as <span className="text-slate-200">{driveProfile.displayName}</span>
-                    {driveProfile.emailAddress ? ` (${driveProfile.emailAddress})` : ""}
-                  </span>
-                )}
-                <Button
-                  onClick={() => handleBulkDownload()}
-                  disabled={!selectedItems.length || isBusy || !driveReadyForActions}
-                  className="bg-[#238636] text-white hover:bg-[#2ea043] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
+                  Google Drive
+                </button>
+                <button
+                  onClick={() => setStorageMode(STORAGE_MODES.LOCAL)}
+                  className={`rounded-full px-3 py-1 font-medium transition ${
+                    usingLocal ? "bg-[#238636] text-white" : "text-slate-300 hover:bg-white/10"
+                  }`}
                 >
+                  Browser vault
+                </button>
+              </div>
+              {usingDrive ? (
+                <>
+                  <Button
+                    onClick={() => handleDriveConnect()}
+                    disabled={!driveClientReady || missingDriveCredentials || isBusy}
+                    className={`${
+                      driveConnected
+                        ? "border border-white/10 bg-white/5 text-white hover:bg-white/10"
+                        : "bg-[#1f6feb] text-white hover:bg-[#388bfd]"
+                    } disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500`}
+                  >
+                    <HardDrive className="mr-2 h-4 w-4" />
+                    {isBusy
+                      ? "Syncing..."
+                      : driveConnected
+                      ? "Refresh Drive"
+                      : "Connect Google Drive"}
+                  </Button>
+                  {driveProfile && (
+                    <span className="text-xs text-slate-400">
+                      Connected as <span className="text-slate-200">{driveProfile.displayName}</span>
+                      {driveProfile.emailAddress ? ` (${driveProfile.emailAddress})` : ""}
+                    </span>
+                  )}
+                </>
+              ) : (
+                <span className="text-xs text-slate-400">
+                  Stored privately on this device. Switch to Google Drive to sync across accounts.
+                </span>
+              )}
+              <Button
+                onClick={() => handleBulkDownload()}
+                disabled={!selectedItems.length || isBusy || !storageReadyForActions}
+                className="bg-[#238636] text-white hover:bg-[#2ea043] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
+              >
                   <Download className="mr-2 h-4 w-4" /> Bulk download ({selectedItems.length})
                 </Button>
               </div>
@@ -2230,11 +2722,17 @@ export default function App() {
                 {driveBootstrapMessage}
               </div>
             )}
-            {!driveError && !driveBootstrapMessage && !driveReadyForActions && !isBusy && (
+            {usingDrive && !driveError && !driveBootstrapMessage && !driveReadyForActions && !isBusy && (
               <div className="mt-4 rounded-2xl border border-amber-400/30 bg-amber-400/10 p-4 text-sm text-amber-100">
                 {missingDriveCredentials
                   ? "Add your Google API credentials to enable Google Drive storage."
                   : "Connect Google Drive to start uploading prompts, scripts, and links."}
+              </div>
+            )}
+            {usingLocal && (
+              <div className="mt-4 rounded-2xl border border-[#3fb950]/40 bg-[#238636]/15 p-4 text-sm text-[#b8ffc7]">
+                Items you upload are saved in this browser only. Use the same device to keep your vault, or switch back to Google
+                Drive mode to sync across accounts.
               </div>
             )}
 
@@ -2273,7 +2771,7 @@ export default function App() {
                     </div>
                     <Button
                       type="submit"
-                      disabled={!driveReadyForActions || isBusy}
+                      disabled={!storageReadyForActions || isBusy}
                       className="bg-[#238636] text-white hover:bg-[#2ea043] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
                     >
                       Save prompt
@@ -2315,7 +2813,7 @@ export default function App() {
                         <label className="text-xs uppercase tracking-wide text-slate-400">Choose file</label>
                         <Input
                           type="file"
-                          disabled={!driveReadyForActions || isBusy}
+                          disabled={!storageReadyForActions || isBusy}
                           onChange={(event) => setScriptFiles(Array.from(event.target.files || []))}
                           className="mt-1 border-white/10 bg-black/40 text-white file:mr-3 file:rounded-lg file:border-0 file:bg-[#1f6feb] file:px-4 file:py-2 file:text-sm file:text-white disabled:cursor-not-allowed"
                         />
@@ -2330,7 +2828,7 @@ export default function App() {
                           ref={folderInputRef}
                           type="file"
                           multiple
-                          disabled={!driveReadyForActions || isBusy}
+                          disabled={!storageReadyForActions || isBusy}
                           onChange={(event) => setScriptFolderFiles(Array.from(event.target.files || []))}
                           className="mt-1 border-white/10 bg-black/40 text-white file:mr-3 file:rounded-lg file:border-0 file:bg-[#1f6feb] file:px-4 file:py-2 file:text-sm file:text-white disabled:cursor-not-allowed"
                         />
@@ -2345,7 +2843,7 @@ export default function App() {
                     </div>
                     <Button
                       type="submit"
-                      disabled={!driveReadyForActions || isBusy}
+                      disabled={!storageReadyForActions || isBusy}
                       className="bg-[#1f6feb] text-white hover:bg-[#388bfd] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
                     >
                       Upload
@@ -2372,7 +2870,7 @@ export default function App() {
                     </div>
                     <Button
                       type="submit"
-                      disabled={!driveReadyForActions || isBusy}
+                      disabled={!storageReadyForActions || isBusy}
                       className="bg-[#bf3989] text-white hover:bg-[#f778ba] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-slate-500"
                     >
                       Save link
