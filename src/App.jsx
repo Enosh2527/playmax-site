@@ -55,6 +55,8 @@ const categories = [
   { id: "links", label: "Links", icon: Link2, accent: "from-[#bf3989] to-[#f778ba]" },
 ];
 
+const TRASH_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
 const DEFAULT_SUPABASE_PROJECT_REF = "cauostpphtbzfyejffhk";
 const DEFAULT_SUPABASE_URL = `https://${DEFAULT_SUPABASE_PROJECT_REF}.supabase.co`;
 const DEFAULT_SUPABASE_ANON_KEY =
@@ -338,6 +340,28 @@ function formatDateTime(iso) {
   });
 }
 
+function formatTrashTimeRemaining(deletedAt) {
+  if (!deletedAt) return "Scheduled for removal";
+  const deletedTime = new Date(deletedAt).getTime();
+  if (Number.isNaN(deletedTime)) return "Scheduled for removal";
+  const expiry = deletedTime + TRASH_RETENTION_MS;
+  const diff = expiry - Date.now();
+  if (diff <= 0) return "Removing soon";
+  const dayMs = 24 * 60 * 60 * 1000;
+  const hourMs = 60 * 60 * 1000;
+  const minuteMs = 60 * 1000;
+  const days = Math.floor(diff / dayMs);
+  const hours = Math.floor((diff % dayMs) / hourMs);
+  const minutes = Math.floor((diff % hourMs) / minuteMs);
+  if (days > 0) {
+    return `${days} day${days === 1 ? "" : "s"}${hours > 0 ? ` ${hours}h` : ""} left`;
+  }
+  if (hours > 0) {
+    return `${hours}h ${minutes}m left`;
+  }
+  return `${Math.max(minutes, 1)}m left`;
+}
+
 function ScriptBreadcrumb({ breadcrumbs, onNavigate }) {
   return (
     <div className="flex flex-wrap items-center gap-1 text-sm text-slate-300">
@@ -394,6 +418,7 @@ const defaultSupabaseSchema = {
       uploader: "uploader",
       uploader_email: "uploader_email",
       created_at: "created_at",
+      deleted_at: "deleted_at",
     },
   },
   links: {
@@ -406,6 +431,7 @@ const defaultSupabaseSchema = {
       uploader: "uploader",
       uploader_email: "uploader_email",
       created_at: "created_at",
+      deleted_at: "deleted_at",
     },
   },
   scripts: {
@@ -423,6 +449,7 @@ const defaultSupabaseSchema = {
       file_mime: "file_mime",
       file_size: "file_size",
       file_content: "file_content",
+      deleted_at: "deleted_at",
     },
   },
 };
@@ -447,9 +474,17 @@ const columnSynonyms = {
 
 const optionalColumns = {
   allowed_emails: new Set(["role", "created_at"]),
-  prompts: new Set(["description", "notes"]),
-  links: new Set(["notes"]),
-  scripts: new Set(["notes", "original_name", "parent_id", "file_mime", "file_size", "file_content"]),
+  prompts: new Set(["description", "notes", "deleted_at"]),
+  links: new Set(["notes", "deleted_at"]),
+  scripts: new Set([
+    "notes",
+    "original_name",
+    "parent_id",
+    "file_mime",
+    "file_size",
+    "file_content",
+    "deleted_at",
+  ]),
 };
 
 function cloneSchema(schema) {
@@ -558,6 +593,7 @@ const mapPromptRow = (row, columns = defaultSupabaseSchema.prompts.columns) => (
   uploader: getColumnName(row, columns.uploader) ?? "Unknown",
   uploaderEmail: getColumnName(row, columns.uploader_email) ?? "",
   createdAt: getColumnName(row, columns.created_at) ?? new Date().toISOString(),
+  deletedAt: getColumnName(row, columns.deleted_at) ?? null,
 });
 
 const mapLinkRow = (row, columns = defaultSupabaseSchema.links.columns) => ({
@@ -568,6 +604,7 @@ const mapLinkRow = (row, columns = defaultSupabaseSchema.links.columns) => ({
   uploader: getColumnName(row, columns.uploader) ?? "Unknown",
   uploaderEmail: getColumnName(row, columns.uploader_email) ?? "",
   createdAt: getColumnName(row, columns.created_at) ?? new Date().toISOString(),
+  deletedAt: getColumnName(row, columns.deleted_at) ?? null,
 });
 
 const mapScriptRow = (row, columns = defaultSupabaseSchema.scripts.columns) => ({
@@ -585,6 +622,7 @@ const mapScriptRow = (row, columns = defaultSupabaseSchema.scripts.columns) => (
   size: Number(getColumnName(row, columns.file_size) ?? 0),
   originalName: getColumnName(row, columns.original_name) ?? getColumnName(row, columns.name),
   content: getColumnName(row, columns.file_content) ?? null,
+  deletedAt: getColumnName(row, columns.deleted_at) ?? null,
 });
 
 const buildSupabaseSchemaMapping = (rows = []) => {
@@ -741,6 +779,9 @@ export default function App() {
   const [prompts, setPrompts] = useState([]);
   const [scripts, setScripts] = useState([]);
   const [links, setLinks] = useState([]);
+  const [trashedPrompts, setTrashedPrompts] = useState([]);
+  const [trashedScripts, setTrashedScripts] = useState([]);
+  const [trashedLinks, setTrashedLinks] = useState([]);
 
   const [supabaseSchema, setSupabaseSchema] = useState(() => cloneSchema(defaultSupabaseSchema));
 
@@ -759,6 +800,7 @@ export default function App() {
   const [contextMenu, setContextMenu] = useState(null);
   const [editingItem, setEditingItem] = useState(null);
   const [linkDownloadTarget, setLinkDownloadTarget] = useState(null);
+  const [pendingDelete, setPendingDelete] = useState(null);
 
   const [activeTab, setActiveTab] = useState("scripts");
 
@@ -873,6 +915,93 @@ export default function App() {
       .join(" • ");
   }, [missingSchemaColumns]);
 
+  const collectScriptBranchIds = useCallback(
+    (rootId, sourceItems = scripts) => {
+      const ids = new Set([rootId]);
+      const queue = [rootId];
+      while (queue.length) {
+        const current = queue.shift();
+        sourceItems.forEach((item) => {
+          if (item.parentId === current && !ids.has(item.id)) {
+            ids.add(item.id);
+            queue.push(item.id);
+          }
+        });
+      }
+      return ids;
+    },
+    [scripts]
+  );
+
+  const cleanupExpiredTrash = useCallback(
+    async ({ prompts: expiredPrompts = [], links: expiredLinks = [], scripts: expiredScripts = [] }) => {
+      if (!storageReady) return;
+
+      const deleteByIds = async (tableKey, ids) => {
+        if (!ids.length) return;
+        await executeSupabase(tableKey, async (schema) => {
+          const config = schema[tableKey];
+          const column = config.columns.id ?? "id";
+          const table = config.table;
+          const chunkSize = 50;
+          for (let i = 0; i < ids.length; i += chunkSize) {
+            const chunk = ids.slice(i, i + chunkSize);
+            const idList = chunk
+              .filter(Boolean)
+              .map((value) => `"${value}"`)
+              .join(",");
+            if (!idList) continue;
+            const encodedValues = encodeURIComponent(`(${idList})`);
+            await supabaseRequest(
+              `${table}?${encodeURIComponent(column)}=in.${encodedValues}`,
+              { method: "DELETE" }
+            );
+          }
+        });
+      };
+
+      try {
+        await deleteByIds(
+          "prompts",
+          expiredPrompts.map((item) => item.id).filter(Boolean)
+        );
+        await deleteByIds(
+          "links",
+          expiredLinks.map((item) => item.id).filter(Boolean)
+        );
+        await deleteByIds(
+          "scripts",
+          expiredScripts.map((item) => item.id).filter(Boolean)
+        );
+      } catch (error) {
+        console.warn("Failed to clean up expired trash", error);
+      }
+    },
+    [executeSupabase, storageReady]
+  );
+
+  const partitionTrashEntries = useCallback((items) => {
+    const active = [];
+    const trashed = [];
+    const expired = [];
+    const cutoff = Date.now() - TRASH_RETENTION_MS;
+
+    items.forEach((item) => {
+      const deletedAt = item.deletedAt ? new Date(item.deletedAt).getTime() : null;
+      if (!deletedAt || Number.isNaN(deletedAt)) {
+        active.push({ ...item, deletedAt: null });
+        return;
+      }
+      if (deletedAt < cutoff) {
+        expired.push(item);
+      } else {
+        trashed.push(item);
+      }
+    });
+
+    return { active, trashed, expired };
+  }, []);
+
   const refreshWorkspace = useCallback(async () => {
     if (!supabaseReady) {
       return;
@@ -943,12 +1072,41 @@ export default function App() {
         mapScriptRow(row, supabaseSchema.scripts.columns)
       );
 
-      promptEntries.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
-      linkEntries.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+      const promptPartitions = partitionTrashEntries(promptEntries);
+      const linkPartitions = partitionTrashEntries(linkEntries);
+      const scriptPartitions = partitionTrashEntries(scriptEntries);
 
-      setPrompts(promptEntries);
-      setLinks(linkEntries);
-      setScripts(scriptEntries);
+      promptPartitions.active.sort(
+        (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)
+      );
+      promptPartitions.trashed.sort(
+        (a, b) => new Date(b.deletedAt || 0) - new Date(a.deletedAt || 0)
+      );
+      linkPartitions.active.sort(
+        (a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)
+      );
+      linkPartitions.trashed.sort(
+        (a, b) => new Date(b.deletedAt || 0) - new Date(a.deletedAt || 0)
+      );
+
+      setPrompts(promptPartitions.active);
+      setTrashedPrompts(promptPartitions.trashed.map((item) => ({ ...item, category: "prompts" })));
+      setLinks(linkPartitions.active);
+      setTrashedLinks(linkPartitions.trashed.map((item) => ({ ...item, category: "links" })));
+      setScripts(scriptPartitions.active);
+      setTrashedScripts(scriptPartitions.trashed.map((item) => ({ ...item, category: "scripts" })));
+
+      if (
+        promptPartitions.expired.length ||
+        linkPartitions.expired.length ||
+        scriptPartitions.expired.length
+      ) {
+        await cleanupExpiredTrash({
+          prompts: promptPartitions.expired,
+          links: linkPartitions.expired,
+          scripts: scriptPartitions.expired,
+        });
+      }
     } catch (error) {
       console.error("Failed to sync Supabase", error);
       setVaultError(
@@ -958,7 +1116,7 @@ export default function App() {
       setWorkspaceLoading(false);
       setVaultStatus("");
     }
-  }, [supabaseReady, supabaseSchema, executeSupabase]);
+  }, [supabaseReady, supabaseSchema, executeSupabase, partitionTrashEntries, cleanupExpiredTrash, describeSupabaseError]);
 
   useEffect(() => {
     if (!supabaseReady) {
@@ -987,6 +1145,41 @@ export default function App() {
     return map;
   }, [scripts]);
 
+  const trashedScriptsById = useMemo(() => {
+    const map = new Map();
+    trashedScripts.forEach((item) => map.set(item.id, item));
+    return map;
+  }, [trashedScripts]);
+
+  const trashedScriptRoots = useMemo(() => {
+    const trashedIds = new Set(trashedScripts.map((item) => item.id));
+    return trashedScripts.filter(
+      (item) => !item.parentId || !trashedIds.has(item.parentId)
+    );
+  }, [trashedScripts]);
+
+  const trashedScriptSummaries = useMemo(() => {
+    const summaries = trashedScriptRoots.map((root) => {
+      const ids = collectScriptBranchIds(root.id, trashedScripts);
+      let fileCount = 0;
+      let folderCount = 0;
+      ids.forEach((id) => {
+        if (id === root.id) return;
+        const node = trashedScriptsById.get(id);
+        if (!node) return;
+        if (node.type === "folder") {
+          folderCount += 1;
+        } else {
+          fileCount += 1;
+        }
+      });
+      return { root, ids, fileCount, folderCount };
+    });
+    return summaries.sort(
+      (a, b) => new Date(b.root.deletedAt || 0) - new Date(a.root.deletedAt || 0)
+    );
+  }, [trashedScriptRoots, trashedScripts, trashedScriptsById, collectScriptBranchIds]);
+
   const scriptBreadcrumbs = useMemo(() => {
     const chain = [];
     let current = currentScriptFolderId ? scriptsById.get(currentScriptFolderId) : null;
@@ -1008,8 +1201,9 @@ export default function App() {
       prompts: prompts.length,
       links: links.length,
       scripts: scripts.filter((item) => item.type === "file").length,
+      bin: trashedPrompts.length + trashedLinks.length + trashedScriptSummaries.length,
     }),
-    [prompts, links, scripts]
+    [prompts, links, scripts, trashedPrompts, trashedLinks, trashedScriptSummaries]
   );
 
   const selectedCounts = useMemo(
@@ -1089,6 +1283,7 @@ export default function App() {
         uploader: currentUser.name,
         uploader_email: currentUser.email,
         created_at: createdAt,
+        deleted_at: null,
       };
       const entry = await executeSupabase("prompts", async (schema) => {
         const shapedPayload = shapeSupabasePayload(schema.prompts, payload);
@@ -1135,6 +1330,7 @@ export default function App() {
         uploader: currentUser.name,
         uploader_email: currentUser.email,
         created_at: createdAt,
+        deleted_at: null,
       };
       const entry = await executeSupabase("links", async (schema) => {
         const shapedPayload = shapeSupabasePayload(schema.links, payload);
@@ -1177,6 +1373,7 @@ export default function App() {
       uploader_email: currentUser.email,
       created_at: createdAt,
       parent_id: parentLogicalId,
+      deleted_at: null,
     };
     rows.push(rootRow);
     const pathToFolderId = new Map();
@@ -1209,6 +1406,7 @@ export default function App() {
             uploader_email: currentUser.email,
             created_at: createdAt,
             parent_id: folderParentId,
+            deleted_at: null,
           });
           pathToFolderId.set(currentPath, folderId);
         }
@@ -1229,6 +1427,7 @@ export default function App() {
         uploader_email: currentUser.email,
         created_at: createdAt,
         parent_id: folderId,
+        deleted_at: null,
       });
     }
 
@@ -1266,6 +1465,7 @@ export default function App() {
           created_at: createdAt,
           parent_id: parentLogicalId,
           file_content: arrayBufferToBase64(buffer),
+          deleted_at: null,
         };
         const entry = await executeSupabase("scripts", async (schema) => {
           const shapedPayload = shapeSupabasePayload(schema.scripts, payload);
@@ -1325,75 +1525,209 @@ export default function App() {
     });
   };
 
-  const collectScriptBranchIds = (rootId) => {
-    const ids = new Set([rootId]);
-    const queue = [rootId];
-    while (queue.length) {
-      const current = queue.shift();
-      scripts.forEach((item) => {
-        if (item.parentId === current && !ids.has(item.id)) {
-          ids.add(item.id);
-          queue.push(item.id);
+  const clearSelectionFor = useCallback(
+    (category, ids) => {
+      setSelectedItems((prev) =>
+        prev.filter((entry) => !(entry.category === category && ids.has(entry.id)))
+      );
+      setPreview((prevPreview) => {
+        if (!prevPreview || prevPreview.category !== category) {
+          return prevPreview;
         }
+        return ids.has(prevPreview.item.id) ? null : prevPreview;
       });
-    }
-    return ids;
-  };
-
-  const pruneScriptItems = (ids) => {
-    setScripts((prev) => prev.filter((item) => !ids.has(item.id)));
-    setSelectedItems((prev) => prev.filter((item) => !(item.category === "scripts" && ids.has(item.id))));
-    setPreview((prevPreview) => {
-      if (prevPreview && prevPreview.category === "scripts" && ids.has(prevPreview.item.id)) {
-        return null;
+      if (category === "scripts") {
+        setCurrentScriptFolderId((currentId) => (currentId && ids.has(currentId) ? null : currentId));
       }
-      return prevPreview;
-    });
-    setCurrentScriptFolderId((currentId) => (currentId && ids.has(currentId) ? null : currentId));
-  };
+    },
+    []
+  );
 
-  const handleDelete = async (category, id) => {
-    if (!storageReady) return;
+  const handleDelete = async ({ category, item, permanent = false }) => {
+    if (!storageReady || !item) return;
+    const idsToClear = new Set();
     try {
       setIsProcessing(true);
       setVaultError("");
+
       if (category === "prompts") {
-        await supabaseRequest(buildFilterPath(supabaseSchema.prompts, "id", id), {
-          method: "DELETE",
-        });
-        setPrompts((prev) => prev.filter((item) => item.id !== id));
-        setSelectedItems((prev) => prev.filter((item) => !(item.category === category && item.id === id)));
-        setPreview((prevPreview) =>
-          prevPreview && prevPreview.category === category && prevPreview.item.id === id ? null : prevPreview
-        );
-        return;
+        idsToClear.add(item.id);
+        if (permanent) {
+          await supabaseRequest(buildFilterPath(supabaseSchema.prompts, "id", item.id), {
+            method: "DELETE",
+          });
+          setTrashedPrompts((prev) => prev.filter((entry) => entry.id !== item.id));
+        } else {
+          const deletedAt = new Date().toISOString();
+          await executeSupabase("prompts", async (schema) => {
+            const payload = shapeSupabasePayload(schema.prompts, { deleted_at: deletedAt });
+            await supabaseRequest(buildFilterPath(schema.prompts, "id", item.id), {
+              method: "PATCH",
+              body: JSON.stringify(payload),
+            });
+          });
+          setPrompts((prev) => prev.filter((entry) => entry.id !== item.id));
+          setTrashedPrompts((prev) => {
+            const next = [
+              { ...item, deletedAt, category: "prompts" },
+              ...prev.filter((entry) => entry.id !== item.id),
+            ];
+            return next.sort((a, b) => new Date(b.deletedAt || 0) - new Date(a.deletedAt || 0));
+          });
+        }
+      } else if (category === "links") {
+        idsToClear.add(item.id);
+        if (permanent) {
+          await supabaseRequest(buildFilterPath(supabaseSchema.links, "id", item.id), {
+            method: "DELETE",
+          });
+          setTrashedLinks((prev) => prev.filter((entry) => entry.id !== item.id));
+        } else {
+          const deletedAt = new Date().toISOString();
+          await executeSupabase("links", async (schema) => {
+            const payload = shapeSupabasePayload(schema.links, { deleted_at: deletedAt });
+            await supabaseRequest(buildFilterPath(schema.links, "id", item.id), {
+              method: "PATCH",
+              body: JSON.stringify(payload),
+            });
+          });
+          setLinks((prev) => prev.filter((entry) => entry.id !== item.id));
+          setTrashedLinks((prev) => {
+            const next = [
+              { ...item, deletedAt, category: "links" },
+              ...prev.filter((entry) => entry.id !== item.id),
+            ];
+            return next.sort((a, b) => new Date(b.deletedAt || 0) - new Date(a.deletedAt || 0));
+          });
+        }
+      } else if (category === "scripts") {
+        const sourceItems = permanent ? trashedScripts : scripts;
+        const ids = collectScriptBranchIds(item.id, sourceItems);
+        ids.forEach((value) => idsToClear.add(value));
+        const idColumn = supabaseSchema.scripts.columns.id ?? "id";
+        const table = supabaseSchema.scripts.table;
+        const idList = Array.from(ids)
+          .map((value) => `"${value}"`)
+          .join(",");
+        const encodedValues = encodeURIComponent(`(${idList})`);
+
+        if (permanent) {
+          await supabaseRequest(
+            `${table}?${encodeURIComponent(idColumn)}=in.${encodedValues}`,
+            { method: "DELETE" }
+          );
+          setTrashedScripts((prev) => prev.filter((entry) => !ids.has(entry.id)));
+        } else {
+          const deletedAt = new Date().toISOString();
+          await executeSupabase("scripts", async (schema) => {
+            const payload = shapeSupabasePayload(schema.scripts, { deleted_at: deletedAt });
+            await supabaseRequest(
+              `${schema.scripts.table}?${encodeURIComponent(idColumn)}=in.${encodedValues}`,
+              {
+                method: "PATCH",
+                body: JSON.stringify(payload),
+              }
+            );
+          });
+          const moved = scripts.filter((entry) => ids.has(entry.id));
+          setScripts((prev) => prev.filter((entry) => !ids.has(entry.id)));
+          setTrashedScripts((prev) => {
+            const next = [
+              ...moved.map((entry) => ({ ...entry, deletedAt, category: "scripts" })),
+              ...prev.filter((entry) => !ids.has(entry.id)),
+            ];
+            return next.sort((a, b) => new Date(b.deletedAt || 0) - new Date(a.deletedAt || 0));
+          });
+        }
       }
-      if (category === "links") {
-        await supabaseRequest(buildFilterPath(supabaseSchema.links, "id", id), {
-          method: "DELETE",
-        });
-        setLinks((prev) => prev.filter((item) => item.id !== id));
-        setSelectedItems((prev) => prev.filter((item) => !(item.category === category && item.id === id)));
-        setPreview((prevPreview) =>
-          prevPreview && prevPreview.category === category && prevPreview.item.id === id ? null : prevPreview
-        );
-        return;
+
+      if (idsToClear.size) {
+        clearSelectionFor(category, idsToClear);
       }
-      const ids = collectScriptBranchIds(id);
-      const idList = Array.from(ids)
-        .map((value) => `"${value}"`)
-        .join(",");
-      const idColumn = supabaseSchema.scripts.columns.id ?? "id";
-      const encodedValues = encodeURIComponent(`(${idList})`);
-      await supabaseRequest(
-        `${supabaseSchema.scripts.table}?${encodeURIComponent(idColumn)}=in.${encodedValues}`,
-        { method: "DELETE" }
-      );
-      pruneScriptItems(ids);
+      setVaultError("");
     } catch (error) {
       console.error("Failed to delete item", error);
       setVaultError(
         describeSupabaseError(error, "Unable to delete the item from Supabase.")
+      );
+    } finally {
+      setPendingDelete(null);
+      setIsProcessing(false);
+    }
+  };
+
+  const handleRestore = async ({ category, item }) => {
+    if (!storageReady || !item) return;
+    try {
+      setIsProcessing(true);
+      setVaultError("");
+
+      if (category === "prompts") {
+        await executeSupabase("prompts", async (schema) => {
+          const payload = shapeSupabasePayload(schema.prompts, { deleted_at: null });
+          await supabaseRequest(buildFilterPath(schema.prompts, "id", item.id), {
+            method: "PATCH",
+            body: JSON.stringify(payload),
+          });
+        });
+        const { category: _omit, ...restored } = { ...item, deletedAt: null };
+        setTrashedPrompts((prev) => prev.filter((entry) => entry.id !== item.id));
+        setPrompts((prev) => {
+          const existing = prev.filter((entry) => entry.id !== restored.id);
+          const next = [...existing, restored];
+          return next.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+        });
+      } else if (category === "links") {
+        await executeSupabase("links", async (schema) => {
+          const payload = shapeSupabasePayload(schema.links, { deleted_at: null });
+          await supabaseRequest(buildFilterPath(schema.links, "id", item.id), {
+            method: "PATCH",
+            body: JSON.stringify(payload),
+          });
+        });
+        const { category: _omit, ...restored } = { ...item, deletedAt: null };
+        setTrashedLinks((prev) => prev.filter((entry) => entry.id !== item.id));
+        setLinks((prev) => {
+          const existing = prev.filter((entry) => entry.id !== restored.id);
+          const next = [...existing, restored];
+          return next.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+        });
+      } else if (category === "scripts") {
+        const ids = collectScriptBranchIds(item.id, trashedScripts);
+        const idColumn = supabaseSchema.scripts.columns.id ?? "id";
+        const idList = Array.from(ids)
+          .map((value) => `"${value}"`)
+          .join(",");
+        const encodedValues = encodeURIComponent(`(${idList})`);
+        await executeSupabase("scripts", async (schema) => {
+          const payload = shapeSupabasePayload(schema.scripts, { deleted_at: null });
+          await supabaseRequest(
+            `${schema.scripts.table}?${encodeURIComponent(idColumn)}=in.${encodedValues}`,
+            {
+              method: "PATCH",
+              body: JSON.stringify(payload),
+            }
+          );
+        });
+        const restoredEntries = Array.from(ids)
+          .map((id) => trashedScriptsById.get(id))
+          .filter(Boolean)
+          .map((entry) => {
+            const { category: _omit, ...rest } = entry;
+            return { ...rest, deletedAt: null };
+          });
+        setTrashedScripts((prev) => prev.filter((entry) => !ids.has(entry.id)));
+        setScripts((prev) => {
+          const remaining = prev.filter((entry) => !ids.has(entry.id));
+          return [...remaining, ...restoredEntries];
+        });
+      }
+
+      setVaultError("");
+    } catch (error) {
+      console.error("Failed to restore item", error);
+      setVaultError(
+        describeSupabaseError(error, "Unable to restore the item in Supabase.")
       );
     } finally {
       setIsProcessing(false);
@@ -1995,8 +2329,8 @@ export default function App() {
           <PencilLine className="h-4 w-4" /> Edit
         </button>
         <button
-          onClick={async () => {
-            await handleDelete(category, item.id);
+          onClick={() => {
+            setPendingDelete({ category, item, permanent: false });
             setContextMenu(null);
           }}
           className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-rose-300 transition hover:bg-rose-500/20"
@@ -2042,6 +2376,42 @@ export default function App() {
           >
             Cancel
           </Button>
+        </div>
+      </div>
+    );
+  };
+
+  const renderDeleteConfirm = () => {
+    if (!pendingDelete) return null;
+    const { category, item, permanent } = pendingDelete;
+    const targetName = item?.name || "this item";
+    const actionLabel = permanent ? "permanently delete" : "move to the bin";
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-8">
+        <div className="w-full max-w-md space-y-4 rounded-2xl border border-[#30363d] bg-[#0d1117] p-6 text-slate-100 shadow-2xl">
+          <div>
+            <h3 className="text-lg font-semibold text-white">Do you want to delete?</h3>
+            <p className="mt-2 text-sm text-slate-400">
+              Are you sure you want to {actionLabel} <span className="text-white">{targetName}</span>? This action applies to the
+              selected {category} entry.
+            </p>
+          </div>
+          <div className="flex justify-end gap-3">
+            <Button
+              variant="outline"
+              onClick={() => setPendingDelete(null)}
+              className="border-[#30363d] bg-[#161b22] text-slate-200 hover:bg-[#1b2330]"
+            >
+              No
+            </Button>
+            <Button
+              onClick={() => handleDelete(pendingDelete)}
+              className="bg-[#bf3989] text-white hover:bg-[#f778ba]"
+              disabled={isBusy}
+            >
+              Yes
+            </Button>
+          </div>
         </div>
       </div>
     );
@@ -2589,12 +2959,121 @@ const renderLinksTab = () => {
   );
 };
 
-const renderDashboard = () => {
-  const tabDefinitions = [
-    { id: "scripts", label: "Scripts", icon: Layers, description: "Automation files and folders" },
-    { id: "prompts", label: "Prompts", icon: FileText, description: "Reusable writing templates" },
-    { id: "links", label: "Links", icon: Link2, description: "Reference URLs and notes" },
-  ];
+const renderBinTab = () => {
+  const hasItems =
+    trashedPrompts.length || trashedLinks.length || trashedScriptSummaries.length;
+
+  const requestDelete = ({ category, item, permanent }) =>
+    setPendingDelete({ category, item, permanent });
+
+  const renderEntry = (entry, extra = null) => {
+    const category = entry.category;
+    const Icon =
+      category === "prompts"
+        ? FileText
+        : category === "links"
+        ? Link2
+        : entry.type === "folder"
+        ? Folder
+        : FileText;
+    const badgeColor =
+      category === "prompts"
+        ? "bg-[#1b4728] text-[#3fb950]"
+        : category === "links"
+        ? "bg-[#4b1d34] text-[#f778ba]"
+        : entry.type === "folder"
+        ? "bg-[#4d380a] text-[#f2cc60]"
+        : "bg-[#0e305c] text-[#58a6ff]";
+    const label = category.charAt(0).toUpperCase() + category.slice(1);
+
+    return (
+      <div
+        key={entry.id}
+        className="flex flex-wrap items-start justify-between gap-4 rounded-2xl border border-[#30363d] bg-[#0d1117] p-4"
+      >
+        <div className="flex items-start gap-4">
+          <div className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl ${badgeColor}`}>
+            <Icon className="h-5 w-5" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <p className="text-lg font-semibold text-white">{entry.name}</p>
+              <Badge className="bg-[#161b22] text-xs text-slate-200">{label}</Badge>
+            </div>
+            <p className="mt-1 text-xs text-slate-400">
+              Deleted {formatDateTime(entry.deletedAt)} • {formatTrashTimeRemaining(entry.deletedAt)}
+            </p>
+            {extra}
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            onClick={() => handleRestore({ category, item: entry })}
+            disabled={isBusy || !storageReady}
+            className="bg-[#1f6feb] text-white hover:bg-[#388bfd] disabled:cursor-not-allowed disabled:bg-[#161b22] disabled:text-slate-500"
+          >
+            Backup
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => requestDelete({ category, item: entry, permanent: true })}
+            disabled={isBusy || !storageReady}
+            className="border-rose-500/40 bg-[#161b22] text-rose-200 hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            Delete
+          </Button>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="space-y-6">
+      <Card className="border-[#30363d] bg-[#0d1117] text-white">
+        <CardHeader className="space-y-2">
+          <CardTitle className="flex items-center gap-2 text-white">
+            <Trash2 className="h-5 w-5 text-rose-300" /> Recently deleted
+          </CardTitle>
+          <p className="text-sm text-slate-400">
+            Items stay in the bin for seven days. Restore them with Backup or remove them forever.
+          </p>
+        </CardHeader>
+      </Card>
+
+      {hasItems ? (
+        <div className="space-y-3">
+          {trashedScriptSummaries.map((summary) => {
+            const { root, fileCount, folderCount } = summary;
+            const extra = (
+              <p className="mt-2 text-xs text-slate-400">
+                {root.type === "folder"
+                  ? `Contains ${folderCount} nested folder${folderCount === 1 ? "" : "s"} and ${fileCount} file${fileCount === 1 ? "" : "s"}.`
+                  : `${fileCount} related file${fileCount === 1 ? "" : "s"} stored in this folder.`}
+              </p>
+            );
+            return renderEntry(root, extra);
+          })}
+          {trashedPrompts.map((entry) => renderEntry(entry))}
+          {trashedLinks.map((entry) => renderEntry(entry))}
+        </div>
+      ) : (
+        <EmptyState
+          icon={Trash2}
+          title="Bin is empty"
+          description="Deleted prompts, scripts, and links will appear here for seven days before they disappear."
+        />
+      )}
+    </div>
+  );
+};
+
+  const renderDashboard = () => {
+    const tabDefinitions = [
+      { id: "scripts", label: "Scripts", icon: Layers, description: "Automation files and folders" },
+      { id: "prompts", label: "Prompts", icon: FileText, description: "Reusable writing templates" },
+      { id: "links", label: "Links", icon: Link2, description: "Reference URLs and notes" },
+      { id: "bin", label: "Bin", icon: Trash2, description: "Recover or remove deleted items" },
+    ];
 
   return (
     <div className="space-y-8">
@@ -2724,6 +3203,7 @@ const renderDashboard = () => {
             {activeTab === "scripts" && renderScriptsTab()}
             {activeTab === "prompts" && renderPromptsTab()}
             {activeTab === "links" && renderLinksTab()}
+            {activeTab === "bin" && renderBinTab()}
           </div>
         </div>
       </div>
@@ -2755,6 +3235,7 @@ const renderDashboard = () => {
           renderDashboard()
         )}
       </div>
+      {renderDeleteConfirm()}
       {renderContextMenu()}
       {renderLinkDownloadDialog()}
       {renderEditDrawer()}
