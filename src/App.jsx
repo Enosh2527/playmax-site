@@ -1546,26 +1546,29 @@ export default function App() {
   const handleDelete = async ({ category, item, permanent = false }) => {
     if (!storageReady || !item) return;
     const idsToClear = new Set();
+    let completed = false;
     try {
       setIsProcessing(true);
       setVaultError("");
 
       if (category === "prompts") {
         idsToClear.add(item.id);
-        if (permanent) {
-          await supabaseRequest(buildFilterPath(supabaseSchema.prompts, "id", item.id), {
-            method: "DELETE",
-          });
-          setTrashedPrompts((prev) => prev.filter((entry) => entry.id !== item.id));
-        } else {
-          const deletedAt = new Date().toISOString();
-          await executeSupabase("prompts", async (schema) => {
+        const deletedAt = permanent ? null : new Date().toISOString();
+        await executeSupabase("prompts", async (schema) => {
+          const path = buildFilterPath(schema.prompts, "id", item.id);
+          if (permanent) {
+            await supabaseRequest(path, { method: "DELETE" });
+          } else {
             const payload = shapeSupabasePayload(schema.prompts, { deleted_at: deletedAt });
-            await supabaseRequest(buildFilterPath(schema.prompts, "id", item.id), {
+            await supabaseRequest(path, {
               method: "PATCH",
               body: JSON.stringify(payload),
             });
-          });
+          }
+        });
+        if (permanent) {
+          setTrashedPrompts((prev) => prev.filter((entry) => entry.id !== item.id));
+        } else {
           setPrompts((prev) => prev.filter((entry) => entry.id !== item.id));
           setTrashedPrompts((prev) => {
             const next = [
@@ -1577,20 +1580,22 @@ export default function App() {
         }
       } else if (category === "links") {
         idsToClear.add(item.id);
-        if (permanent) {
-          await supabaseRequest(buildFilterPath(supabaseSchema.links, "id", item.id), {
-            method: "DELETE",
-          });
-          setTrashedLinks((prev) => prev.filter((entry) => entry.id !== item.id));
-        } else {
-          const deletedAt = new Date().toISOString();
-          await executeSupabase("links", async (schema) => {
+        const deletedAt = permanent ? null : new Date().toISOString();
+        await executeSupabase("links", async (schema) => {
+          const path = buildFilterPath(schema.links, "id", item.id);
+          if (permanent) {
+            await supabaseRequest(path, { method: "DELETE" });
+          } else {
             const payload = shapeSupabasePayload(schema.links, { deleted_at: deletedAt });
-            await supabaseRequest(buildFilterPath(schema.links, "id", item.id), {
+            await supabaseRequest(path, {
               method: "PATCH",
               body: JSON.stringify(payload),
             });
-          });
+          }
+        });
+        if (permanent) {
+          setTrashedLinks((prev) => prev.filter((entry) => entry.id !== item.id));
+        } else {
           setLinks((prev) => prev.filter((entry) => entry.id !== item.id));
           setTrashedLinks((prev) => {
             const next = [
@@ -1603,41 +1608,42 @@ export default function App() {
       } else if (category === "scripts") {
         const sourceItems = permanent ? trashedScripts : scripts;
         const ids = collectScriptBranchIds(item.id, sourceItems);
-        ids.forEach((value) => idsToClear.add(value));
-        const idColumn = supabaseSchema.scripts.columns.id ?? "id";
-        const table = supabaseSchema.scripts.table;
-        const idList = Array.from(ids)
-          .map((value) => `"${value}"`)
-          .join(",");
-        const encodedValues = encodeURIComponent(`(${idList})`);
-
-        if (permanent) {
-          await supabaseRequest(
-            `${table}?${encodeURIComponent(idColumn)}=in.${encodedValues}`,
-            { method: "DELETE" }
-          );
-          setTrashedScripts((prev) => prev.filter((entry) => !ids.has(entry.id)));
-        } else {
-          const deletedAt = new Date().toISOString();
+        const idValues = Array.from(ids).filter(Boolean);
+        idValues.forEach((value) => idsToClear.add(value));
+        if (idValues.length) {
+          const deletedAt = permanent ? null : new Date().toISOString();
           await executeSupabase("scripts", async (schema) => {
-            const payload = shapeSupabasePayload(schema.scripts, { deleted_at: deletedAt });
-            await supabaseRequest(
-              `${schema.scripts.table}?${encodeURIComponent(idColumn)}=in.${encodedValues}`,
-              {
+            const idColumn = schema.scripts.columns.id ?? "id";
+            const table = schema.scripts.table;
+            const formattedList = idValues
+              .map((value) => `"${String(value).replace(/"/g, '\\"')}"`)
+              .join(",");
+            const filter = `${table}?${encodeURIComponent(idColumn)}=in.${encodeURIComponent(
+              `(${formattedList})`
+            )}`;
+            if (permanent) {
+              await supabaseRequest(filter, { method: "DELETE" });
+            } else {
+              const payload = shapeSupabasePayload(schema.scripts, { deleted_at: deletedAt });
+              await supabaseRequest(filter, {
                 method: "PATCH",
                 body: JSON.stringify(payload),
-              }
-            );
+              });
+            }
           });
-          const moved = scripts.filter((entry) => ids.has(entry.id));
-          setScripts((prev) => prev.filter((entry) => !ids.has(entry.id)));
-          setTrashedScripts((prev) => {
-            const next = [
-              ...moved.map((entry) => ({ ...entry, deletedAt, category: "scripts" })),
-              ...prev.filter((entry) => !ids.has(entry.id)),
-            ];
-            return next.sort((a, b) => new Date(b.deletedAt || 0) - new Date(a.deletedAt || 0));
-          });
+          if (permanent) {
+            setTrashedScripts((prev) => prev.filter((entry) => !ids.has(entry.id)));
+          } else {
+            const moved = scripts.filter((entry) => ids.has(entry.id));
+            setScripts((prev) => prev.filter((entry) => !ids.has(entry.id)));
+            setTrashedScripts((prev) => {
+              const next = [
+                ...moved.map((entry) => ({ ...entry, deletedAt, category: "scripts" })),
+                ...prev.filter((entry) => !ids.has(entry.id)),
+              ];
+              return next.sort((a, b) => new Date(b.deletedAt || 0) - new Date(a.deletedAt || 0));
+            });
+          }
         }
       }
 
@@ -1645,14 +1651,17 @@ export default function App() {
         clearSelectionFor(category, idsToClear);
       }
       setVaultError("");
+      completed = true;
     } catch (error) {
       console.error("Failed to delete item", error);
       setVaultError(
         describeSupabaseError(error, "Unable to delete the item from Supabase.")
       );
     } finally {
-      setPendingDelete(null);
       setIsProcessing(false);
+      if (completed) {
+        setPendingDelete(null);
+      }
     }
   };
 
