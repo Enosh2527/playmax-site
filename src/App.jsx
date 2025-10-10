@@ -129,11 +129,13 @@ async function supabaseRequest(path, { method = "GET", headers = {}, body, signa
     },
     body,
   });
+  const contentType = response.headers.get("Content-Type") || "";
+  const rawText = await response.text();
+
   if (!response.ok) {
-    const text = await response.text();
-    const parsed = parseSupabaseErrorPayload(text);
+    const parsed = parseSupabaseErrorPayload(rawText);
     const error = new Error(
-      parsed?.message || text || `Supabase request failed (${response.status})`
+      parsed?.message || rawText || `Supabase request failed (${response.status})`
     );
     if (parsed?.code) {
       error.code = parsed.code;
@@ -147,10 +149,21 @@ async function supabaseRequest(path, { method = "GET", headers = {}, body, signa
     error.status = response.status;
     throw error;
   }
-  if (response.status === 204) {
+
+  if (!rawText || !rawText.trim()) {
     return null;
   }
-  return response.json();
+
+  if (/application\/json/i.test(contentType)) {
+    try {
+      return JSON.parse(rawText);
+    } catch (error) {
+      console.warn("Failed to parse Supabase JSON response", error);
+      return null;
+    }
+  }
+
+  return rawText;
 }
 
 const textEncoder = new TextEncoder();
@@ -778,11 +791,21 @@ export default function App() {
   }, [supabaseReady, vaultError]);
 
   useEffect(() => {
-    if (scriptMode !== "folder") return;
     const node = folderInputRef.current;
-    if (node) {
+    if (!node) return;
+    if (scriptMode === "folder") {
+      try {
+        node.webkitdirectory = true;
+      } catch (error) {
+        // Some browsers expose the attribute but not the property; ignore failures.
+      }
       node.setAttribute("webkitdirectory", "");
       node.setAttribute("directory", "");
+      node.setAttribute("mozdirectory", "");
+    } else {
+      node.removeAttribute("webkitdirectory");
+      node.removeAttribute("directory");
+      node.removeAttribute("mozdirectory");
     }
   }, [scriptMode]);
 
@@ -2670,8 +2693,10 @@ const renderDashboard = () => {
                 >
                   <div className="flex items-center gap-3">
                     <div
-                      className={`flex h-10 w-10 items-center justify-center rounded-xl ${
-                        isActive ? "bg-[#1f6feb]/20 text-[#58a6ff]" : "bg-[#0e305c] text-[#58a6ff]"
+                      className={`flex h-10 w-10 items-center justify-center rounded-xl transition ${
+                        isActive
+                          ? "bg-[#238636] text-white shadow-[0_0_0_1px_rgba(63,185,80,0.6)]"
+                          : "bg-[#161b22] text-[#58a6ff]"
                       }`}
                     >
                       <Icon className="h-5 w-5" />
