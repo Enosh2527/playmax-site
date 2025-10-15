@@ -580,6 +580,19 @@ const buildFilterPath = (tableSchema, columnKey, value) => {
   return `${tableSchema.table}?${encodeURIComponent(column)}=eq.${encodeURIComponent(value)}`;
 };
 
+const buildInFilterPath = (tableSchema, columnKey, values = []) => {
+  const table = tableSchema?.table ?? columnKey;
+  const column = tableSchema?.columns?.[columnKey] ?? columnKey;
+  const unique = Array.from(new Set(values.filter((value) => value !== undefined && value !== null)));
+  if (!unique.length) {
+    return `${table}?${encodeURIComponent(column)}=in.%28%29`;
+  }
+  const formatted = unique
+    .map((value) => `"${String(value).replace(/"/g, '\\"')}"`)
+    .join(",");
+  return `${table}?${encodeURIComponent(column)}=in.${encodeURIComponent(`(${formatted})`)}`;
+};
+
 const getColumnName = (row, column) => {
   if (!column) return undefined;
   return row?.[column];
@@ -796,6 +809,16 @@ export default function App() {
 
   const [currentScriptFolderId, setCurrentScriptFolderId] = useState(null);
   const [selectedItems, setSelectedItems] = useState([]);
+  const [uploaderFilters, setUploaderFilters] = useState({
+    prompts: null,
+    scripts: null,
+    links: null,
+  });
+  const [uploadProgress, setUploadProgress] = useState({
+    prompts: null,
+    scripts: null,
+    links: null,
+  });
   const [preview, setPreview] = useState(null);
   const [contextMenu, setContextMenu] = useState(null);
   const [editingItem, setEditingItem] = useState(null);
@@ -815,6 +838,125 @@ export default function App() {
   const describeSupabaseError = useCallback(
     (error, fallback) => formatSupabaseErrorMessage(error, fallback),
     []
+  );
+
+  const beginUploadProgress = useCallback((category, label) => {
+    const id = crypto.randomUUID();
+    setUploadProgress((prev) => ({
+      ...prev,
+      [category]: { id, label, value: 0, status: "running" },
+    }));
+    return id;
+  }, []);
+
+  const updateUploadProgress = useCallback((category, id, updates) => {
+    setUploadProgress((prev) => {
+      const current = prev[category];
+      if (!current || current.id !== id) {
+        return prev;
+      }
+      const next = { ...current };
+      if (typeof updates.label === "string") {
+        next.label = updates.label;
+      }
+      if (typeof updates.status === "string") {
+        next.status = updates.status;
+      }
+      if (typeof updates.value === "number") {
+        const currentValue = typeof current.value === "number" ? current.value : 0;
+        const clamped = Math.min(100, Math.max(0, updates.value));
+        next.value = Math.max(currentValue, clamped);
+      }
+      return {
+        ...prev,
+        [category]: next,
+      };
+    });
+  }, []);
+
+  const completeUploadProgress = useCallback((category, id, label) => {
+    setUploadProgress((prev) => {
+      const current = prev[category];
+      if (!current || current.id !== id) {
+        return prev;
+      }
+      return {
+        ...prev,
+        [category]: {
+          ...current,
+          label: label ?? current.label,
+          value: 100,
+          status: "complete",
+        },
+      };
+    });
+    setTimeout(() => {
+      setUploadProgress((prev) => {
+        const current = prev[category];
+        if (!current || current.id !== id || current.status !== "complete") {
+          return prev;
+        }
+        return { ...prev, [category]: null };
+      });
+    }, 1200);
+  }, []);
+
+  const failUploadProgress = useCallback((category, id, label) => {
+    setUploadProgress((prev) => {
+      const current = prev[category];
+      if (!current || current.id !== id) {
+        return prev;
+      }
+      return {
+        ...prev,
+        [category]: {
+          ...current,
+          label: label ?? current.label,
+          status: "error",
+        },
+      };
+    });
+    setTimeout(() => {
+      setUploadProgress((prev) => {
+        const current = prev[category];
+        if (!current || current.id !== id || current.status !== "error") {
+          return prev;
+        }
+        return { ...prev, [category]: null };
+      });
+    }, 3000);
+  }, []);
+
+  const ensureEmailAllowed = useCallback(
+    async (email) => {
+      if (!email) {
+        return false;
+      }
+      if (allowedEmails.includes(email)) {
+        return true;
+      }
+      if (!supabaseReady || !supabaseSchema.allowed_emails?.columns?.email) {
+        return false;
+      }
+      try {
+        const column = supabaseSchema.allowed_emails.columns.email;
+        const table = supabaseSchema.allowed_emails.table;
+        const response = await supabaseRequest(
+          `${table}?${encodeURIComponent(column)}=eq.${encodeURIComponent(email)}`
+        );
+        if (Array.isArray(response) && response.length) {
+          setAllowedEmails((prev) => {
+            const next = Array.from(new Set([...prev, email])).sort((a, b) => a.localeCompare(b));
+            return next;
+          });
+          return true;
+        }
+      } catch (error) {
+        console.warn("Failed to verify Supabase allowlist", error);
+      }
+      return false;
+    },
+    [allowedEmails, supabaseReady, supabaseSchema]
   );
   const connectionLabel = useMemo(() => {
     if (!supabaseReady) return "Storage not configured";
@@ -1191,10 +1333,69 @@ export default function App() {
     return chain.reverse().map((crumb, index, array) => ({ ...crumb, active: index === array.length - 1 }));
   }, [currentScriptFolderId, scriptsById]);
 
-  const scriptsInView = useMemo(
-    () => scripts.filter((item) => item.parentId === (currentScriptFolderId ?? null)),
-    [scripts, currentScriptFolderId]
-  );
+  const promptUploaders = useMemo(() => {
+    const unique = new Set();
+    prompts.forEach((entry) => {
+      const email = String(entry.uploaderEmail || "").toLowerCase();
+      if (email) {
+        unique.add(email);
+      }
+    });
+    return Array.from(unique).sort((a, b) => a.localeCompare(b));
+  }, [prompts]);
+
+  const linkUploaders = useMemo(() => {
+    const unique = new Set();
+    links.forEach((entry) => {
+      const email = String(entry.uploaderEmail || "").toLowerCase();
+      if (email) {
+        unique.add(email);
+      }
+    });
+    return Array.from(unique).sort((a, b) => a.localeCompare(b));
+  }, [links]);
+
+  const scriptUploaders = useMemo(() => {
+    const unique = new Set();
+    scripts.forEach((entry) => {
+      const email = String(entry.uploaderEmail || "").toLowerCase();
+      if (email) {
+        unique.add(email);
+      }
+    });
+    return Array.from(unique).sort((a, b) => a.localeCompare(b));
+  }, [scripts]);
+
+  const filteredPrompts = useMemo(() => {
+    const filter = uploaderFilters.prompts;
+    if (!filter) {
+      return prompts;
+    }
+    return prompts.filter(
+      (entry) => String(entry.uploaderEmail || "").toLowerCase() === filter
+    );
+  }, [prompts, uploaderFilters.prompts]);
+
+  const filteredLinks = useMemo(() => {
+    const filter = uploaderFilters.links;
+    if (!filter) {
+      return links;
+    }
+    return links.filter(
+      (entry) => String(entry.uploaderEmail || "").toLowerCase() === filter
+    );
+  }, [links, uploaderFilters.links]);
+
+  const scriptsInView = useMemo(() => {
+    const base = scripts.filter((item) => item.parentId === (currentScriptFolderId ?? null));
+    const filter = uploaderFilters.scripts;
+    if (!filter) {
+      return base;
+    }
+    return base.filter(
+      (entry) => String(entry.uploaderEmail || "").toLowerCase() === filter
+    );
+  }, [scripts, currentScriptFolderId, uploaderFilters.scripts]);
 
   const totals = useMemo(
     () => ({
@@ -1218,7 +1419,7 @@ export default function App() {
   const isBusy = isProcessing || workspaceLoading;
   const adminOnly = currentUser?.role === "admin";
 
-  const handleAuth = (event) => {
+  const handleAuth = async (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const email = String(form.get("email")).trim().toLowerCase();
@@ -1237,7 +1438,8 @@ export default function App() {
       return;
     }
 
-    if (!allowedEmails.includes(email)) {
+    const hasAccess = await ensureEmailAllowed(email);
+    if (!hasAccess) {
       setAuthError("This email does not have access yet. Ask an admin for approval.");
       return;
     }
@@ -1272,9 +1474,12 @@ export default function App() {
     const notes = String(form.get("notes") || "").trim();
     if (!name) return;
     const createdAt = new Date().toISOString();
+    let progressId = null;
     try {
       setIsProcessing(true);
       setVaultError("");
+      progressId = beginUploadProgress("prompts", "Saving prompt…");
+      updateUploadProgress("prompts", progressId, { value: 15 });
       const payload = {
         id: crypto.randomUUID(),
         name,
@@ -1287,6 +1492,10 @@ export default function App() {
       };
       const entry = await executeSupabase("prompts", async (schema) => {
         const shapedPayload = shapeSupabasePayload(schema.prompts, payload);
+        updateUploadProgress("prompts", progressId, {
+          label: "Uploading to Supabase…",
+          value: 45,
+        });
         const data = await supabaseRequest(schema.prompts.table, {
           method: "POST",
           headers: { Prefer: "return=representation" },
@@ -1294,13 +1503,18 @@ export default function App() {
         });
         return mapPromptRow((data ?? [shapedPayload])[0], schema.prompts.columns);
       });
+      updateUploadProgress("prompts", progressId, { label: "Finalising prompt…", value: 80 });
       setPrompts((prev) =>
         [...prev, entry].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
       );
       formElement?.reset();
+      completeUploadProgress("prompts", progressId, "Prompt saved");
       setVaultError("");
     } catch (error) {
       console.error("Failed to add prompt", error);
+      if (progressId) {
+        failUploadProgress("prompts", progressId, "Prompt upload failed");
+      }
       setVaultError(
         describeSupabaseError(error, "Unable to save the prompt to Supabase.")
       );
@@ -1319,9 +1533,12 @@ export default function App() {
     const notes = String(form.get("notes") || "").trim();
     if (!name || !url) return;
     const createdAt = new Date().toISOString();
+    let progressId = null;
     try {
       setIsProcessing(true);
       setVaultError("");
+      progressId = beginUploadProgress("links", "Saving link…");
+      updateUploadProgress("links", progressId, { value: 15 });
       const payload = {
         id: crypto.randomUUID(),
         name,
@@ -1334,6 +1551,10 @@ export default function App() {
       };
       const entry = await executeSupabase("links", async (schema) => {
         const shapedPayload = shapeSupabasePayload(schema.links, payload);
+        updateUploadProgress("links", progressId, {
+          label: "Uploading to Supabase…",
+          value: 45,
+        });
         const data = await supabaseRequest(schema.links.table, {
           method: "POST",
           headers: { Prefer: "return=representation" },
@@ -1341,13 +1562,18 @@ export default function App() {
         });
         return mapLinkRow((data ?? [shapedPayload])[0], schema.links.columns);
       });
+      updateUploadProgress("links", progressId, { label: "Finalising link…", value: 80 });
       setLinks((prev) =>
         [...prev, entry].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
       );
       formElement?.reset();
+      completeUploadProgress("links", progressId, "Link saved");
       setVaultError("");
     } catch (error) {
       console.error("Failed to add link", error);
+      if (progressId) {
+        failUploadProgress("links", progressId, "Link upload failed");
+      }
       setVaultError(
         describeSupabaseError(error, "Unable to save the link to Supabase.")
       );
@@ -1356,10 +1582,24 @@ export default function App() {
     }
   };
 
-  const gatherFolderRows = async ({ files, name, notes, createdAt, parentLogicalId }) => {
+  const gatherFolderRows = async ({
+    files,
+    name,
+    notes,
+    createdAt,
+    parentLogicalId,
+    onProgress,
+  }) => {
     const rows = [];
     const rootId = crypto.randomUUID();
     const defaultRootName = files[0]?.webkitRelativePath?.split("/")[0] || "Folder";
+    const totalBytes = files.reduce((sum, file) => sum + Number(file.size || 0), 0);
+    let processedBytes = 0;
+    const reportProgress = (fileName = "") => {
+      if (typeof onProgress === "function") {
+        onProgress({ processedBytes, totalBytes, fileName });
+      }
+    };
     const rootRow = {
       id: rootId,
       type: "folder",
@@ -1378,6 +1618,8 @@ export default function App() {
     rows.push(rootRow);
     const pathToFolderId = new Map();
     pathToFolderId.set("", rootId);
+
+    reportProgress();
 
     for (const file of files) {
       const rawPath = file.webkitRelativePath || file.name;
@@ -1429,6 +1671,8 @@ export default function App() {
         parent_id: folderId,
         deleted_at: null,
       });
+      processedBytes += Number(file.size || 0);
+      reportProgress(file.name);
     }
 
     return rows;
@@ -1443,6 +1687,7 @@ export default function App() {
     const notes = String(form.get("notes") || "").trim();
     const createdAt = new Date().toISOString();
     const parentLogicalId = currentScriptFolderId ?? null;
+    let progressId = null;
 
     try {
       setIsProcessing(true);
@@ -1451,7 +1696,13 @@ export default function App() {
       if (scriptMode === "file") {
         if (!scriptFiles.length) return;
         const file = scriptFiles[0];
+        progressId = beginUploadProgress("scripts", "Preparing script file…");
+        updateUploadProgress("scripts", progressId, { value: 12 });
         const buffer = await file.arrayBuffer();
+        updateUploadProgress("scripts", progressId, {
+          label: "Encoding file…",
+          value: 32,
+        });
         const payload = {
           id: crypto.randomUUID(),
           type: "file",
@@ -1469,6 +1720,10 @@ export default function App() {
         };
         const entry = await executeSupabase("scripts", async (schema) => {
           const shapedPayload = shapeSupabasePayload(schema.scripts, payload);
+          updateUploadProgress("scripts", progressId, {
+            label: "Uploading to Supabase…",
+            value: 55,
+          });
           const data = await supabaseRequest(schema.scripts.table, {
             method: "POST",
             headers: { Prefer: "return=representation" },
@@ -1476,23 +1731,43 @@ export default function App() {
           });
           return mapScriptRow((data ?? [shapedPayload])[0], schema.scripts.columns);
         });
+        updateUploadProgress("scripts", progressId, {
+          label: "Finalising upload…",
+          value: 85,
+        });
         setScripts((prev) => [...prev, entry]);
         setScriptFiles([]);
         formElement?.reset();
+        completeUploadProgress("scripts", progressId, "Upload complete");
         setVaultError("");
         return;
       }
 
       if (!scriptFolderFiles.length) return;
+      progressId = beginUploadProgress("scripts", "Preparing folder upload…");
+      updateUploadProgress("scripts", progressId, { value: 12 });
       const rows = await gatherFolderRows({
         files: Array.from(scriptFolderFiles),
         name,
         notes,
         createdAt,
         parentLogicalId,
+        onProgress: ({ processedBytes, totalBytes, fileName }) => {
+          if (!progressId) return;
+          const portion = totalBytes ? processedBytes / totalBytes : 1;
+          const value = 12 + portion * 50;
+          updateUploadProgress("scripts", progressId, {
+            value,
+            label: fileName ? `Encoding ${fileName}` : "Preparing folder…",
+          });
+        },
       });
       const inserted = await executeSupabase("scripts", async (schema) => {
         const shapedRows = rows.map((row) => shapeSupabasePayload(schema.scripts, row));
+        updateUploadProgress("scripts", progressId, {
+          label: "Uploading to Supabase…",
+          value: 75,
+        });
         const data = await supabaseRequest(schema.scripts.table, {
           method: "POST",
           headers: { Prefer: "return=representation" },
@@ -1501,12 +1776,20 @@ export default function App() {
         const responseRows = Array.isArray(data) ? data : shapedRows;
         return responseRows.map((row) => mapScriptRow(row, schema.scripts.columns));
       });
+      updateUploadProgress("scripts", progressId, {
+        label: "Finalising upload…",
+        value: 92,
+      });
       setScripts((prev) => [...prev, ...inserted]);
       setScriptFolderFiles([]);
       formElement?.reset();
+      completeUploadProgress("scripts", progressId, "Upload complete");
       setVaultError("");
     } catch (error) {
       console.error("Failed to store scripts", error);
+      if (progressId) {
+        failUploadProgress("scripts", progressId, "Script upload failed");
+      }
       setVaultError(
         describeSupabaseError(error, "Unable to save the scripts to Supabase.")
       );
@@ -1543,8 +1826,48 @@ export default function App() {
     []
   );
 
-  const handleDelete = async ({ category, item, permanent = false }) => {
-    if (!storageReady || !item) return;
+  const handleFilterChange = useCallback(
+    (category, value) => {
+      const normalised = value ? value.toLowerCase() : null;
+      setUploaderFilters((prev) => ({ ...prev, [category]: normalised }));
+      setSelectedItems((prev) => prev.filter((entry) => entry.category !== category));
+      setPreview((prevPreview) => {
+        if (!prevPreview || prevPreview.category !== category) {
+          return prevPreview;
+        }
+        if (!normalised) {
+          return prevPreview;
+        }
+        const previewEmail = String(prevPreview.item?.uploaderEmail || "").toLowerCase();
+        return previewEmail === normalised ? prevPreview : null;
+      });
+      if (category === "scripts") {
+        setCurrentScriptFolderId((currentId) => {
+          if (!normalised || !currentId) {
+            return currentId;
+          }
+          const currentFolder = scriptsById.get(currentId);
+          if (!currentFolder) {
+            return null;
+          }
+          const email = String(currentFolder.uploaderEmail || "").toLowerCase();
+          return email === normalised ? currentId : null;
+        });
+      }
+    },
+    [scriptsById, setCurrentScriptFolderId, setPreview, setSelectedItems, setUploaderFilters]
+  );
+
+  const handleDelete = async ({
+    category,
+    item,
+    items,
+    permanent = false,
+    bulk = false,
+  }) => {
+    if (!storageReady) return;
+    const targets = bulk ? items ?? [] : item ? [item] : [];
+    if (!targets.length) return;
     const idsToClear = new Set();
     let completed = false;
     try {
@@ -1552,75 +1875,80 @@ export default function App() {
       setVaultError("");
 
       if (category === "prompts") {
-        idsToClear.add(item.id);
+        const ids = new Set(targets.map((entry) => entry.id).filter(Boolean));
+        ids.forEach((id) => idsToClear.add(id));
         const deletedAt = permanent ? null : new Date().toISOString();
         await executeSupabase("prompts", async (schema) => {
-          const path = buildFilterPath(schema.prompts, "id", item.id);
+          const path = buildInFilterPath(schema.prompts, "id", Array.from(ids));
           if (permanent) {
             await supabaseRequest(path, { method: "DELETE" });
-          } else {
-            const payload = shapeSupabasePayload(schema.prompts, { deleted_at: deletedAt });
-            await supabaseRequest(path, {
-              method: "PATCH",
-              body: JSON.stringify(payload),
-            });
+            return;
           }
+          const payload = shapeSupabasePayload(schema.prompts, { deleted_at: deletedAt });
+          await supabaseRequest(path, {
+            method: "PATCH",
+            body: JSON.stringify(payload),
+          });
         });
         if (permanent) {
-          setTrashedPrompts((prev) => prev.filter((entry) => entry.id !== item.id));
+          setTrashedPrompts((prev) => prev.filter((entry) => !ids.has(entry.id)));
         } else {
-          setPrompts((prev) => prev.filter((entry) => entry.id !== item.id));
+          setPrompts((prev) => prev.filter((entry) => !ids.has(entry.id)));
           setTrashedPrompts((prev) => {
-            const next = [
-              { ...item, deletedAt, category: "prompts" },
-              ...prev.filter((entry) => entry.id !== item.id),
-            ];
+            const moved = targets.map((entry) => ({
+              ...entry,
+              deletedAt,
+              category: "prompts",
+            }));
+            const remaining = prev.filter((entry) => !ids.has(entry.id));
+            const next = [...moved, ...remaining];
             return next.sort((a, b) => new Date(b.deletedAt || 0) - new Date(a.deletedAt || 0));
           });
         }
       } else if (category === "links") {
-        idsToClear.add(item.id);
+        const ids = new Set(targets.map((entry) => entry.id).filter(Boolean));
+        ids.forEach((id) => idsToClear.add(id));
         const deletedAt = permanent ? null : new Date().toISOString();
         await executeSupabase("links", async (schema) => {
-          const path = buildFilterPath(schema.links, "id", item.id);
+          const path = buildInFilterPath(schema.links, "id", Array.from(ids));
           if (permanent) {
             await supabaseRequest(path, { method: "DELETE" });
-          } else {
-            const payload = shapeSupabasePayload(schema.links, { deleted_at: deletedAt });
-            await supabaseRequest(path, {
-              method: "PATCH",
-              body: JSON.stringify(payload),
-            });
+            return;
           }
+          const payload = shapeSupabasePayload(schema.links, { deleted_at: deletedAt });
+          await supabaseRequest(path, {
+            method: "PATCH",
+            body: JSON.stringify(payload),
+          });
         });
         if (permanent) {
-          setTrashedLinks((prev) => prev.filter((entry) => entry.id !== item.id));
+          setTrashedLinks((prev) => prev.filter((entry) => !ids.has(entry.id)));
         } else {
-          setLinks((prev) => prev.filter((entry) => entry.id !== item.id));
+          setLinks((prev) => prev.filter((entry) => !ids.has(entry.id)));
           setTrashedLinks((prev) => {
-            const next = [
-              { ...item, deletedAt, category: "links" },
-              ...prev.filter((entry) => entry.id !== item.id),
-            ];
+            const moved = targets.map((entry) => ({
+              ...entry,
+              deletedAt,
+              category: "links",
+            }));
+            const remaining = prev.filter((entry) => !ids.has(entry.id));
+            const next = [...moved, ...remaining];
             return next.sort((a, b) => new Date(b.deletedAt || 0) - new Date(a.deletedAt || 0));
           });
         }
       } else if (category === "scripts") {
         const sourceItems = permanent ? trashedScripts : scripts;
-        const ids = collectScriptBranchIds(item.id, sourceItems);
-        const idValues = Array.from(ids).filter(Boolean);
+        const branchIds = new Set();
+        targets.forEach((target) => {
+          const ids = collectScriptBranchIds(target.id, sourceItems);
+          ids.forEach((value) => branchIds.add(value));
+        });
+        const idValues = Array.from(branchIds).filter(Boolean);
         idValues.forEach((value) => idsToClear.add(value));
         if (idValues.length) {
           const deletedAt = permanent ? null : new Date().toISOString();
           await executeSupabase("scripts", async (schema) => {
-            const idColumn = schema.scripts.columns.id ?? "id";
-            const table = schema.scripts.table;
-            const formattedList = idValues
-              .map((value) => `"${String(value).replace(/"/g, '\\"')}"`)
-              .join(",");
-            const filter = `${table}?${encodeURIComponent(idColumn)}=in.${encodeURIComponent(
-              `(${formattedList})`
-            )}`;
+            const filter = buildInFilterPath(schema.scripts, "id", idValues);
             if (permanent) {
               await supabaseRequest(filter, { method: "DELETE" });
             } else {
@@ -1632,14 +1960,14 @@ export default function App() {
             }
           });
           if (permanent) {
-            setTrashedScripts((prev) => prev.filter((entry) => !ids.has(entry.id)));
+            setTrashedScripts((prev) => prev.filter((entry) => !branchIds.has(entry.id)));
           } else {
-            const moved = scripts.filter((entry) => ids.has(entry.id));
-            setScripts((prev) => prev.filter((entry) => !ids.has(entry.id)));
+            const moved = scripts.filter((entry) => branchIds.has(entry.id));
+            setScripts((prev) => prev.filter((entry) => !branchIds.has(entry.id)));
             setTrashedScripts((prev) => {
               const next = [
                 ...moved.map((entry) => ({ ...entry, deletedAt, category: "scripts" })),
-                ...prev.filter((entry) => !ids.has(entry.id)),
+                ...prev.filter((entry) => !branchIds.has(entry.id)),
               ];
               return next.sort((a, b) => new Date(b.deletedAt || 0) - new Date(a.deletedAt || 0));
             });
@@ -1929,6 +2257,31 @@ export default function App() {
     }
   };
 
+  const handleBulkDeleteForCategory = (category) => {
+    const selection = selectedItems.filter((entry) => entry.category === category);
+    if (!selection.length) {
+      return;
+    }
+    let items = [];
+    if (category === "prompts") {
+      items = selection
+        .map((entry) => prompts.find((prompt) => prompt.id === entry.id))
+        .filter(Boolean);
+    } else if (category === "links") {
+      items = selection
+        .map((entry) => links.find((link) => link.id === entry.id))
+        .filter(Boolean);
+    } else if (category === "scripts") {
+      items = selection
+        .map((entry) => scriptsById.get(entry.id))
+        .filter(Boolean);
+    }
+    if (!items.length) {
+      return;
+    }
+    setPendingDelete({ category, items, bulk: true, permanent: false });
+  };
+
   const handleEditSubmit = async (event) => {
     event.preventDefault();
     if (!editingItem || !storageReady) return;
@@ -2083,6 +2436,17 @@ export default function App() {
               {category === "scripts" && item.type === "folder" && (
                 <Badge className="rounded-full bg-[#f2cc60]/20 text-xs text-[#f2cc60]">Folder</Badge>
               )}
+              {item.uploaderEmail && (
+                <Badge
+                  className={`rounded-full text-xs ${
+                    item.uploaderEmail === currentUser?.email
+                      ? "bg-[#238636]/30 text-[#3fb950]"
+                      : "bg-[#0b2f53] text-[#9cc4ff]"
+                  }`}
+                >
+                  {item.uploaderEmail}
+                </Badge>
+              )}
             </div>
             <p className="mt-1 text-xs text-slate-400">
               Uploaded by {item.uploader} • {formatDateTime(item.createdAt)}
@@ -2102,6 +2466,57 @@ export default function App() {
             <MoreHorizontal className="h-4 w-4" />
           </Button>
         </div>
+      </div>
+    );
+  };
+
+  const renderUploaderFilter = (category, options) => (
+    <label className="flex items-center gap-3 text-sm text-slate-300">
+      <span className="whitespace-nowrap text-xs font-semibold uppercase tracking-wide text-slate-400">Sort/Filter</span>
+      <select
+        value={uploaderFilters[category] ?? ""}
+        onChange={(event) => handleFilterChange(category, event.target.value || null)}
+        className="rounded-lg border border-[#30363d] bg-[#161b22] px-3 py-2 text-sm text-slate-100 focus:border-[#58a6ff] focus:outline-none"
+      >
+        <option value="">All uploads</option>
+        {options.map((email) => (
+          <option key={email} value={email}>
+            {email}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+
+  const renderUploadProgressBar = (category) => {
+    const progress = uploadProgress[category];
+    if (!progress) {
+      return null;
+    }
+    const percent = Math.round(progress.value ?? 0);
+    const barColor =
+      progress.status === "error"
+        ? "bg-[#f85149]"
+        : progress.status === "complete"
+        ? "bg-[#238636]"
+        : "bg-[#1f6feb]";
+    return (
+      <div className="rounded-xl border border-[#30363d] bg-[#161b22] p-4 text-sm text-slate-200">
+        <div className="flex items-center justify-between text-xs text-slate-300">
+          <span>{progress.label}</span>
+          {progress.status !== "error" && <span>{percent}%</span>}
+        </div>
+        <div className="mt-2 h-2 overflow-hidden rounded-full bg-[#0d1117]">
+          <div
+            className={`${barColor} h-full transition-all`}
+            style={{ width: `${Math.min(100, Math.max(0, progress.value ?? 0))}%` }}
+          />
+        </div>
+        {progress.status === "error" && (
+          <p className="mt-2 text-xs text-rose-300">
+            Upload failed. Please resolve the issue and try again.
+          </p>
+        )}
       </div>
     );
   };
@@ -2130,6 +2545,17 @@ export default function App() {
             </p>
           </div>
           <div className="flex items-center gap-2">
+            {item.uploaderEmail && (
+              <Badge
+                className={`rounded-full text-xs ${
+                  item.uploaderEmail === currentUser?.email
+                    ? "bg-[#238636]/30 text-[#3fb950]"
+                    : "bg-[#0b2f53] text-[#9cc4ff]"
+                }`}
+              >
+                {item.uploaderEmail}
+              </Badge>
+            )}
             <Badge className="bg-[#161b22] text-xs text-slate-200">{category.toUpperCase()}</Badge>
             {category === "scripts" && item.type === "folder" && (
               <Badge className="bg-[#4d380a] text-xs text-[#f2cc60]">Folder</Badge>
@@ -2392,8 +2818,14 @@ export default function App() {
 
   const renderDeleteConfirm = () => {
     if (!pendingDelete) return null;
-    const { category, item, permanent } = pendingDelete;
-    const targetName = item?.name || "this item";
+    const { category, item, items, permanent, bulk } = pendingDelete;
+    const total = bulk ? (items?.length ?? 0) : 1;
+    const targetName = bulk
+      ? `${total} ${category}${total === 1 ? " entry" : " entries"}`
+      : item?.name || "this item";
+    const scopeLabel = bulk
+      ? `the selected ${category} entries`
+      : `the selected ${category} entry`;
     const actionLabel = permanent ? "permanently delete" : "move to the bin";
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4 py-8">
@@ -2401,8 +2833,7 @@ export default function App() {
           <div>
             <h3 className="text-lg font-semibold text-white">Do you want to delete?</h3>
             <p className="mt-2 text-sm text-slate-400">
-              Are you sure you want to {actionLabel} <span className="text-white">{targetName}</span>? This action applies to the
-              selected {category} entry.
+              Are you sure you want to {actionLabel} <span className="text-white">{targetName}</span>? This action applies to {scopeLabel}.
             </p>
           </div>
           <div className="flex justify-end gap-3">
@@ -2773,33 +3204,46 @@ const renderScriptsTab = () => {
                   )}
                 </div>
               </div>
-              <div className="flex justify-end">
-                <Button
-                  type="submit"
-                  disabled={isBusy || !storageReady}
-                  className="bg-[#1f6feb] text-white hover:bg-[#388bfd] disabled:cursor-not-allowed disabled:bg-[#161b22] disabled:text-slate-500"
-                >
-                  Upload
-                </Button>
-              </div>
-            </form>
-          </CardContent>
-        </Card>
+            <div className="flex justify-end">
+              <Button
+                type="submit"
+                disabled={isBusy || !storageReady}
+                className="bg-[#1f6feb] text-white hover:bg-[#388bfd] disabled:cursor-not-allowed disabled:bg-[#161b22] disabled:text-slate-500"
+              >
+                Upload
+              </Button>
+            </div>
+          </form>
+          {renderUploadProgressBar("scripts")}
+        </CardContent>
+      </Card>
 
         <div className="space-y-6">
           <Card className="border-[#30363d] bg-[#0d1117] text-white">
-            <CardHeader className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <CardHeader className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <div>
                 <CardTitle className="text-white">Scripts</CardTitle>
                 <p className="text-sm text-slate-400">Navigate folders and manage uploaded automation assets.</p>
               </div>
-              <Button
-                onClick={() => handleBulkDownloadForCategory("scripts")}
-                disabled={!selectedCount || isBusy || !storageReady}
-                className="bg-[#238636] text-white hover:bg-[#2ea043] disabled:cursor-not-allowed disabled:bg-[#161b22] disabled:text-slate-500"
-              >
-                <Download className="mr-2 h-4 w-4" /> Bulk download ({selectedCount})
-              </Button>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                {renderUploaderFilter("scripts", scriptUploaders)}
+                <div className="flex flex-wrap justify-end gap-2">
+                  <Button
+                    onClick={() => handleBulkDeleteForCategory("scripts")}
+                    disabled={!selectedCount || isBusy || !storageReady}
+                    className="bg-[#bf3989] text-white hover:bg-[#f778ba] disabled:cursor-not-allowed disabled:bg-[#161b22] disabled:text-slate-500"
+                  >
+                    <Trash2 className="mr-2 h-4 w-4" /> Bulk delete ({selectedCount})
+                  </Button>
+                  <Button
+                    onClick={() => handleBulkDownloadForCategory("scripts")}
+                    disabled={!selectedCount || isBusy || !storageReady}
+                    className="bg-[#238636] text-white hover:bg-[#2ea043] disabled:cursor-not-allowed disabled:bg-[#161b22] disabled:text-slate-500"
+                  >
+                    <Download className="mr-2 h-4 w-4" /> Bulk download ({selectedCount})
+                  </Button>
+                </div>
+              </div>
             </CardHeader>
             <CardContent className="space-y-4">
               <ScriptBreadcrumb breadcrumbs={scriptBreadcrumbs} onNavigate={setCurrentScriptFolderId} />
@@ -2809,8 +3253,14 @@ const renderScriptsTab = () => {
                 ) : (
                   <EmptyState
                     icon={Folder}
-                    title="This folder is empty"
-                    description="Upload a file or folder to populate this space."
+                    title={
+                      uploaderFilters.scripts ? "No scripts for this teammate" : "This folder is empty"
+                    }
+                    description={
+                      uploaderFilters.scripts
+                        ? "Select another teammate or clear the filter to explore all available scripts."
+                        : "Upload a file or folder to populate this space."
+                    }
                   />
                 )}
               </div>
@@ -2858,35 +3308,52 @@ const renderPromptsTab = () => {
               </Button>
             </div>
           </form>
+          {renderUploadProgressBar("prompts")}
         </CardContent>
       </Card>
 
       <div className="space-y-6">
         <Card className="border-[#30363d] bg-[#0d1117] text-white">
-          <CardHeader className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <CardHeader className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <div>
               <CardTitle className="text-white">Prompt library</CardTitle>
               <p className="text-sm text-slate-400">Right-click any prompt to edit, download, or remove it.</p>
             </div>
-            <Button
-              onClick={() => handleBulkDownloadForCategory("prompts")}
-              disabled={!selectedCount || isBusy || !storageReady}
-              className="bg-[#238636] text-white hover:bg-[#2ea043] disabled:cursor-not-allowed disabled:bg-[#161b22] disabled:text-slate-500"
-            >
-              <Download className="mr-2 h-4 w-4" /> Bulk download ({selectedCount})
-            </Button>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+              {renderUploaderFilter("prompts", promptUploaders)}
+              <div className="flex flex-wrap justify-end gap-2">
+                <Button
+                  onClick={() => handleBulkDeleteForCategory("prompts")}
+                  disabled={!selectedCount || isBusy || !storageReady}
+                  className="bg-[#bf3989] text-white hover:bg-[#f778ba] disabled:cursor-not-allowed disabled:bg-[#161b22] disabled:text-slate-500"
+                >
+                  <Trash2 className="mr-2 h-4 w-4" /> Bulk delete ({selectedCount})
+                </Button>
+                <Button
+                  onClick={() => handleBulkDownloadForCategory("prompts")}
+                  disabled={!selectedCount || isBusy || !storageReady}
+                  className="bg-[#238636] text-white hover:bg-[#2ea043] disabled:cursor-not-allowed disabled:bg-[#161b22] disabled:text-slate-500"
+                >
+                  <Download className="mr-2 h-4 w-4" /> Bulk download ({selectedCount})
+                </Button>
+              </div>
+            </div>
           </CardHeader>
           <CardContent className="space-y-3">
-            {prompts.length ? (
-              prompts
+            {filteredPrompts.length ? (
+              filteredPrompts
                 .slice()
                 .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
                 .map((prompt) => renderListItem("prompts", prompt))
             ) : (
               <EmptyState
                 icon={FileText}
-                title="No prompts yet"
-                description="Add your first prompt to keep it handy for future sessions."
+                title={uploaderFilters.prompts ? "No prompts for this teammate" : "No prompts yet"}
+                description={
+                  uploaderFilters.prompts
+                    ? "Choose another uploader or clear the filter to browse all prompts."
+                    : "Add your first prompt to keep it handy for future sessions."
+                }
               />
             )}
           </CardContent>
@@ -2928,35 +3395,52 @@ const renderLinksTab = () => {
               </Button>
             </div>
           </form>
+          {renderUploadProgressBar("links")}
         </CardContent>
       </Card>
 
       <div className="space-y-6">
         <Card className="border-[#30363d] bg-[#0d1117] text-white">
-          <CardHeader className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <CardHeader className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <div>
               <CardTitle className="text-white">Link directory</CardTitle>
               <p className="text-sm text-slate-400">Download entries in the format you need straight from the context menu.</p>
             </div>
-            <Button
-              onClick={() => handleBulkDownloadForCategory("links")}
-              disabled={!selectedCount || isBusy || !storageReady}
-              className="bg-[#238636] text-white hover:bg-[#2ea043] disabled:cursor-not-allowed disabled:bg-[#161b22] disabled:text-slate-500"
-            >
-              <Download className="mr-2 h-4 w-4" /> Bulk download ({selectedCount})
-            </Button>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+              {renderUploaderFilter("links", linkUploaders)}
+              <div className="flex flex-wrap justify-end gap-2">
+                <Button
+                  onClick={() => handleBulkDeleteForCategory("links")}
+                  disabled={!selectedCount || isBusy || !storageReady}
+                  className="bg-[#bf3989] text-white hover:bg-[#f778ba] disabled:cursor-not-allowed disabled:bg-[#161b22] disabled:text-slate-500"
+                >
+                  <Trash2 className="mr-2 h-4 w-4" /> Bulk delete ({selectedCount})
+                </Button>
+                <Button
+                  onClick={() => handleBulkDownloadForCategory("links")}
+                  disabled={!selectedCount || isBusy || !storageReady}
+                  className="bg-[#238636] text-white hover:bg-[#2ea043] disabled:cursor-not-allowed disabled:bg-[#161b22] disabled:text-slate-500"
+                >
+                  <Download className="mr-2 h-4 w-4" /> Bulk download ({selectedCount})
+                </Button>
+              </div>
+            </div>
           </CardHeader>
           <CardContent className="space-y-3">
-            {links.length ? (
-              links
+            {filteredLinks.length ? (
+              filteredLinks
                 .slice()
                 .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
                 .map((link) => renderListItem("links", link))
             ) : (
               <EmptyState
                 icon={Link2}
-                title="No links saved"
-                description="Keep your go-to resources a click away by adding them here."
+                title={uploaderFilters.links ? "No links for this teammate" : "No links saved"}
+                description={
+                  uploaderFilters.links
+                    ? "Select a different uploader or clear the filter to view all saved links."
+                    : "Keep your go-to resources a click away by adding them here."
+                }
               />
             )}
           </CardContent>
