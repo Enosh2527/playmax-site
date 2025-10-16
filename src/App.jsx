@@ -19,6 +19,7 @@ import {
   MoreHorizontal,
   Layers,
   Cloud,
+  Info,
 } from "lucide-react";
 import { Button } from "./components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
@@ -889,6 +890,7 @@ export default function App() {
   const [isProcessing, setIsProcessing] = useState(false);
 
   const [missingSchemaColumns, setMissingSchemaColumns] = useState([]);
+  const [schemaWarningDismissed, setSchemaWarningDismissed] = useState(false);
 
   const [currentScriptFolderId, setCurrentScriptFolderId] = useState(null);
   const [selectedItems, setSelectedItems] = useState([]);
@@ -909,6 +911,17 @@ export default function App() {
   const [pendingDelete, setPendingDelete] = useState(null);
 
   const [activeTab, setActiveTab] = useState("scripts");
+
+  useEffect(() => {
+    setSelectedItems((prev) => prev.filter((entry) => entry.category === activeTab));
+    setContextMenu(null);
+  }, [activeTab]);
+
+  const handleTabChange = useCallback((tabId) => {
+    setActiveTab(tabId);
+    setSelectedItems([]);
+    setContextMenu(null);
+  }, []);
 
   const [scriptMode, setScriptMode] = useState("file");
   const [scriptFiles, setScriptFiles] = useState([]);
@@ -1166,9 +1179,16 @@ export default function App() {
 
   const schemaWarningText = useMemo(() => {
     if (!missingSchemaColumns.length) return "";
-    return missingSchemaColumns
-      .map((entry) => `${entry.table}: ${entry.column}`)
+    const formatted = missingSchemaColumns
+      .map((entry) => `${entry.table} ${entry.column}`)
       .join(" • ");
+    return `Optional Supabase fields were missing and have been disabled automatically (${formatted}). Uploads will continue using the available columns.`;
+  }, [missingSchemaColumns]);
+
+  useEffect(() => {
+    if (missingSchemaColumns.length) {
+      setSchemaWarningDismissed(false);
+    }
   }, [missingSchemaColumns]);
 
   const collectScriptBranchIds = useCallback(
@@ -1632,6 +1652,7 @@ export default function App() {
       formElement?.reset();
       completeUploadProgress("prompts", progressId, "Prompt saved");
       setVaultError("");
+      refreshWorkspace();
     } catch (error) {
       console.error("Failed to add prompt", error);
       if (progressId) {
@@ -1699,6 +1720,7 @@ export default function App() {
       formElement?.reset();
       completeUploadProgress("links", progressId, "Link saved");
       setVaultError("");
+      refreshWorkspace();
     } catch (error) {
       console.error("Failed to add link", error);
       if (progressId) {
@@ -1891,6 +1913,7 @@ export default function App() {
         formElement?.reset();
         completeUploadProgress("scripts", progressId, "Upload complete");
         setVaultError("");
+        refreshWorkspace();
         return;
       }
 
@@ -1937,6 +1960,7 @@ export default function App() {
       formElement?.reset();
       completeUploadProgress("scripts", progressId, "Upload complete");
       setVaultError("");
+      refreshWorkspace();
     } catch (error) {
       console.error("Failed to store scripts", error);
       if (progressId) {
@@ -2141,6 +2165,7 @@ export default function App() {
       setIsProcessing(false);
       if (completed) {
         setPendingDelete(null);
+        refreshWorkspace();
       }
     }
   };
@@ -2213,6 +2238,7 @@ export default function App() {
       }
 
       setVaultError("");
+      refreshWorkspace();
     } catch (error) {
       console.error("Failed to restore item", error);
       setVaultError(
@@ -2618,6 +2644,7 @@ export default function App() {
 
       setEditingItem(null);
       setVaultError("");
+      refreshWorkspace();
     } catch (error) {
       console.error("Failed to update item", error);
       setVaultError(
@@ -3293,6 +3320,7 @@ export default function App() {
                     Array.from(new Set([...prev, email])).sort((a, b) => a.localeCompare(b))
                   );
                   formElement?.reset();
+                  refreshWorkspace();
                 } catch (error) {
                   console.error("Failed to store allowed email", error);
                   setVaultError(
@@ -3343,6 +3371,7 @@ export default function App() {
                           { method: "DELETE" }
                         );
                         setAllowedEmails((prev) => prev.filter((entry) => entry !== email));
+                        refreshWorkspace();
                       } catch (error) {
                         console.error("Failed to remove allowed email", error);
                         setVaultError(
@@ -3942,10 +3971,18 @@ const renderBinTab = () => {
               <Cloud className={`h-4 w-4 ${storageReady ? "text-[#58a6ff]" : "text-current"}`} /> {connectionLabel}
             </span>
             {vaultStatus && <span className="text-xs text-slate-300">{vaultStatus}</span>}
-            {schemaWarningText && (
-              <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-3 py-1 text-xs text-amber-100">
-                {schemaWarningText}
-              </span>
+            {schemaWarningText && !schemaWarningDismissed && (
+              <div className="flex items-center gap-2 rounded-full border border-[#58a6ff]/40 bg-[#0b2f53] px-3 py-1 text-xs text-[#9cc4ff]">
+                <Info className="h-4 w-4" />
+                <span className="whitespace-pre-wrap">{schemaWarningText}</span>
+                <button
+                  type="button"
+                  onClick={() => setSchemaWarningDismissed(true)}
+                  className="rounded-full px-2 py-0.5 text-[10px] uppercase tracking-wide transition hover:bg-[#13233d]"
+                >
+                  Dismiss
+                </button>
+              </div>
             )}
             {vaultError && (
               <span className="rounded-full border border-rose-500/40 bg-rose-500/15 px-3 py-1 text-xs text-rose-100">
@@ -3971,7 +4008,7 @@ const renderBinTab = () => {
                 <button
                   key={tab.id}
                   type="button"
-                  onClick={() => setActiveTab(tab.id)}
+                  onClick={() => handleTabChange(tab.id)}
                   className={`flex min-w-[220px] flex-1 items-center justify-between rounded-2xl border px-4 py-3 text-left transition ${
                     isActive
                       ? "border-[#58a6ff] bg-[#0d1624] shadow-[0_0_0_1px_rgba(88,166,255,0.4)]"
