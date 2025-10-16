@@ -560,13 +560,50 @@ const optionalColumns = {
 };
 
 const PROMPT_FALLBACK_TOKEN = "__vaulthub_prompt";
-const PROMPT_FALLBACK_VERSION = 1;
+const PROMPT_FALLBACK_VERSION = 2;
 
-const encodePromptFallback = ({ description = "", notes = "" }) =>
+const LINK_FALLBACK_TOKEN = "__vaulthub_link";
+const LINK_FALLBACK_VERSION = 1;
+
+const SCRIPT_FALLBACK_TOKEN = "__vaulthub_script";
+const SCRIPT_FALLBACK_VERSION = 1;
+
+const normaliseReferenceData = (input = {}) => {
+  if (!input) {
+    return null;
+  }
+  const name = input.name ?? input.reference_name ?? null;
+  const mime = input.mime ?? input.reference_mime ?? null;
+  const size =
+    input.size !== undefined
+      ? input.size
+      : input.reference_size !== undefined
+      ? input.reference_size
+      : null;
+  const content = input.content ?? input.reference_content ?? null;
+  if (!name && !mime && !size && !content) {
+    return null;
+  }
+  return {
+    name,
+    mime,
+    size,
+    content,
+  };
+};
+
+const encodePromptFallback = ({
+  description = "",
+  notes = "",
+  deleted_at = null,
+  reference = null,
+} = {}) =>
   JSON.stringify({
     [PROMPT_FALLBACK_TOKEN]: PROMPT_FALLBACK_VERSION,
     description,
     notes,
+    deleted_at,
+    reference: reference ? { ...reference } : null,
   });
 
 const decodePromptFallback = (value) => {
@@ -575,30 +612,231 @@ const decodePromptFallback = (value) => {
   }
   try {
     const parsed = JSON.parse(value);
-    if (
-      !parsed ||
-      typeof parsed !== "object" ||
-      parsed[PROMPT_FALLBACK_TOKEN] !== PROMPT_FALLBACK_VERSION
-    ) {
+    if (!parsed || typeof parsed !== "object") {
+      return null;
+    }
+    if (parsed[PROMPT_FALLBACK_TOKEN] === 1) {
+      return {
+        description: typeof parsed.description === "string" ? parsed.description : "",
+        notes: typeof parsed.notes === "string" ? parsed.notes : "",
+        deleted_at: null,
+        reference: null,
+      };
+    }
+    if (parsed[PROMPT_FALLBACK_TOKEN] !== PROMPT_FALLBACK_VERSION) {
       return null;
     }
     return {
       description: typeof parsed.description === "string" ? parsed.description : "",
       notes: typeof parsed.notes === "string" ? parsed.notes : "",
+      deleted_at: parsed.deleted_at ?? null,
+      reference: normaliseReferenceData(parsed.reference),
     };
   } catch (error) {
     return null;
   }
 };
 
-const applyPromptFallbackColumns = (tableSchema, payload, canonical) => {
-  if (!tableSchema?.columns?.description && tableSchema?.columns?.notes) {
-    const noteColumn = tableSchema.columns.notes;
-    payload[noteColumn] = encodePromptFallback({
-      description: canonical?.description ?? "",
-      notes: canonical?.notes ?? "",
-    });
+const encodeLinkFallback = ({ notes = "", deleted_at = null, reference = null } = {}) =>
+  JSON.stringify({
+    [LINK_FALLBACK_TOKEN]: LINK_FALLBACK_VERSION,
+    notes,
+    deleted_at,
+    reference: reference ? { ...reference } : null,
+  });
+
+const decodeLinkFallback = (value) => {
+  if (typeof value !== "string" || !value.trim().startsWith("{")) {
+    return null;
   }
+  try {
+    const parsed = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object" || parsed[LINK_FALLBACK_TOKEN] !== LINK_FALLBACK_VERSION) {
+      return null;
+    }
+    return {
+      notes: typeof parsed.notes === "string" ? parsed.notes : "",
+      deleted_at: parsed.deleted_at ?? null,
+      reference: normaliseReferenceData(parsed.reference),
+    };
+  } catch (error) {
+    return null;
+  }
+};
+
+const encodeScriptFallback = ({ notes = "", deleted_at = null, reference = null } = {}) =>
+  JSON.stringify({
+    [SCRIPT_FALLBACK_TOKEN]: SCRIPT_FALLBACK_VERSION,
+    notes,
+    deleted_at,
+    reference: reference ? { ...reference } : null,
+  });
+
+const decodeScriptFallback = (value) => {
+  if (typeof value !== "string" || !value.trim().startsWith("{")) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object" || parsed[SCRIPT_FALLBACK_TOKEN] !== SCRIPT_FALLBACK_VERSION) {
+      return null;
+    }
+    return {
+      notes: typeof parsed.notes === "string" ? parsed.notes : "",
+      deleted_at: parsed.deleted_at ?? null,
+      reference: normaliseReferenceData(parsed.reference),
+    };
+  } catch (error) {
+    return null;
+  }
+};
+
+const applyPromptFallbackColumns = (tableSchema, payload, canonical = {}, existingFallback = null) => {
+  if (!tableSchema?.columns) {
+    return payload;
+  }
+  const { columns } = tableSchema;
+  const fallbackColumn = columns.notes ?? columns.description ?? null;
+  if (!fallbackColumn) {
+    return payload;
+  }
+
+  const needsDescriptionFallback = !columns.description && canonical.description !== undefined;
+  const needsNotesFallback = !columns.notes && canonical.notes !== undefined;
+  const needsDeletedFallback = !columns.deleted_at && canonical.deleted_at !== undefined;
+  const hasReferenceInput =
+    canonical.reference_name !== undefined ||
+    canonical.reference_mime !== undefined ||
+    canonical.reference_size !== undefined ||
+    canonical.reference_content !== undefined;
+  const needsReferenceFallback =
+    (!columns.reference_name ||
+      !columns.reference_mime ||
+      !columns.reference_size ||
+      !columns.reference_content) && hasReferenceInput;
+
+  if (!needsDescriptionFallback && !needsNotesFallback && !needsDeletedFallback && !needsReferenceFallback) {
+    return payload;
+  }
+
+  const base = {
+    description:
+      canonical.description !== undefined
+        ? canonical.description ?? ""
+        : existingFallback?.description ?? "",
+    notes:
+      canonical.notes !== undefined ? canonical.notes ?? "" : existingFallback?.notes ?? "",
+    deleted_at:
+      canonical.deleted_at !== undefined ? canonical.deleted_at : existingFallback?.deleted_at ?? null,
+    reference: existingFallback?.reference ?? null,
+  };
+
+  if (hasReferenceInput) {
+    base.reference = normaliseReferenceData({
+      name: canonical.reference_name,
+      mime: canonical.reference_mime,
+      size: canonical.reference_size,
+      content: canonical.reference_content,
+    }) ?? base.reference;
+  }
+
+  payload[fallbackColumn] = encodePromptFallback(base);
+  return payload;
+};
+
+const applyLinkFallbackColumns = (tableSchema, payload, canonical = {}, existingFallback = null) => {
+  if (!tableSchema?.columns) {
+    return payload;
+  }
+  const { columns } = tableSchema;
+  const fallbackColumn = columns.notes ?? null;
+  if (!fallbackColumn) {
+    return payload;
+  }
+
+  const needsNotesFallback = !columns.notes && canonical.notes !== undefined;
+  const needsDeletedFallback = !columns.deleted_at && canonical.deleted_at !== undefined;
+  const hasReferenceInput =
+    canonical.reference_name !== undefined ||
+    canonical.reference_mime !== undefined ||
+    canonical.reference_size !== undefined ||
+    canonical.reference_content !== undefined;
+  const needsReferenceFallback =
+    (!columns.reference_name ||
+      !columns.reference_mime ||
+      !columns.reference_size ||
+      !columns.reference_content) && hasReferenceInput;
+
+  if (!needsNotesFallback && !needsDeletedFallback && !needsReferenceFallback) {
+    return payload;
+  }
+
+  const base = {
+    notes:
+      canonical.notes !== undefined ? canonical.notes ?? "" : existingFallback?.notes ?? "",
+    deleted_at:
+      canonical.deleted_at !== undefined ? canonical.deleted_at : existingFallback?.deleted_at ?? null,
+    reference: existingFallback?.reference ?? null,
+  };
+
+  if (hasReferenceInput) {
+    base.reference = normaliseReferenceData({
+      name: canonical.reference_name,
+      mime: canonical.reference_mime,
+      size: canonical.reference_size,
+      content: canonical.reference_content,
+    }) ?? base.reference;
+  }
+
+  payload[fallbackColumn] = encodeLinkFallback(base);
+  return payload;
+};
+
+const applyScriptFallbackColumns = (tableSchema, payload, canonical = {}, existingFallback = null) => {
+  if (!tableSchema?.columns) {
+    return payload;
+  }
+  const { columns } = tableSchema;
+  const fallbackColumn = columns.notes ?? null;
+  if (!fallbackColumn) {
+    return payload;
+  }
+
+  const needsNotesFallback = !columns.notes && canonical.notes !== undefined;
+  const needsDeletedFallback = !columns.deleted_at && canonical.deleted_at !== undefined;
+  const hasReferenceInput =
+    canonical.reference_name !== undefined ||
+    canonical.reference_mime !== undefined ||
+    canonical.reference_size !== undefined ||
+    canonical.reference_content !== undefined;
+  const needsReferenceFallback =
+    (!columns.reference_name ||
+      !columns.reference_mime ||
+      !columns.reference_size ||
+      !columns.reference_content) && hasReferenceInput;
+
+  if (!needsNotesFallback && !needsDeletedFallback && !needsReferenceFallback) {
+    return payload;
+  }
+
+  const base = {
+    notes:
+      canonical.notes !== undefined ? canonical.notes ?? "" : existingFallback?.notes ?? "",
+    deleted_at:
+      canonical.deleted_at !== undefined ? canonical.deleted_at : existingFallback?.deleted_at ?? null,
+    reference: existingFallback?.reference ?? null,
+  };
+
+  if (hasReferenceInput) {
+    base.reference = normaliseReferenceData({
+      name: canonical.reference_name,
+      mime: canonical.reference_mime,
+      size: canonical.reference_size,
+      content: canonical.reference_content,
+    }) ?? base.reference;
+  }
+
+  payload[fallbackColumn] = encodeScriptFallback(base);
   return payload;
 };
 
@@ -716,10 +954,31 @@ const getColumnName = (row, column) => {
 const mapPromptRow = (row, columns = defaultSupabaseSchema.prompts.columns) => {
   const rawNotes = getColumnName(row, columns.notes);
   const rawDescription = getColumnName(row, columns.description);
-  const fallback = decodePromptFallback(rawNotes);
-  const resolvedDescription =
-    (typeof rawDescription === "string" ? rawDescription : "") || fallback?.description || "";
-  const resolvedNotes = fallback?.notes ?? (typeof rawNotes === "string" ? rawNotes : rawNotes ?? "");
+  const fallback =
+    decodePromptFallback(typeof rawNotes === "string" ? rawNotes : null) ||
+    decodePromptFallback(typeof rawDescription === "string" ? rawDescription : null);
+  const resolvedDescription = (() => {
+    const value = typeof rawDescription === "string" ? rawDescription : "";
+    if (fallback && typeof value === "string" && value.trim().startsWith("{")) {
+      return fallback.description ?? "";
+    }
+    if (value) {
+      return value;
+    }
+    return fallback?.description ?? "";
+  })();
+  const resolvedNotes = (() => {
+    const value = typeof rawNotes === "string" ? rawNotes : rawNotes ?? "";
+    if (fallback && typeof value === "string" && value.trim().startsWith("{")) {
+      return fallback.notes ?? "";
+    }
+    if (fallback?.notes && !value) {
+      return fallback.notes;
+    }
+    return value;
+  })();
+  const resolvedReference = fallback?.reference ?? null;
+  const deletedAt = getColumnName(row, columns.deleted_at) ?? fallback?.deleted_at ?? null;
   return {
     id: getColumnName(row, columns.id),
     name: getColumnName(row, columns.name),
@@ -728,50 +987,94 @@ const mapPromptRow = (row, columns = defaultSupabaseSchema.prompts.columns) => {
     uploader: getColumnName(row, columns.uploader) ?? "Unknown",
     uploaderEmail: getColumnName(row, columns.uploader_email) ?? "",
     createdAt: getColumnName(row, columns.created_at) ?? new Date().toISOString(),
-    deletedAt: getColumnName(row, columns.deleted_at) ?? null,
-    referenceName: getColumnName(row, columns.reference_name) ?? "",
-    referenceMime: getColumnName(row, columns.reference_mime) ?? "",
-    referenceSize: Number(getColumnName(row, columns.reference_size) ?? 0),
-    referenceContent: getColumnName(row, columns.reference_content) ?? null,
+    deletedAt,
+    referenceName: getColumnName(row, columns.reference_name) ?? resolvedReference?.name ?? "",
+    referenceMime: getColumnName(row, columns.reference_mime) ?? resolvedReference?.mime ?? "",
+    referenceSize: Number(
+      getColumnName(row, columns.reference_size) ?? resolvedReference?.size ?? 0
+    ),
+    referenceContent:
+      getColumnName(row, columns.reference_content) ?? resolvedReference?.content ?? null,
+    fallbackData: fallback,
   };
 };
 
-const mapLinkRow = (row, columns = defaultSupabaseSchema.links.columns) => ({
-  id: getColumnName(row, columns.id),
-  name: getColumnName(row, columns.name),
-  url: getColumnName(row, columns.url),
-  notes: getColumnName(row, columns.notes) ?? "",
-  uploader: getColumnName(row, columns.uploader) ?? "Unknown",
-  uploaderEmail: getColumnName(row, columns.uploader_email) ?? "",
-  createdAt: getColumnName(row, columns.created_at) ?? new Date().toISOString(),
-  deletedAt: getColumnName(row, columns.deleted_at) ?? null,
-  referenceName: getColumnName(row, columns.reference_name) ?? "",
-  referenceMime: getColumnName(row, columns.reference_mime) ?? "",
-  referenceSize: Number(getColumnName(row, columns.reference_size) ?? 0),
-  referenceContent: getColumnName(row, columns.reference_content) ?? null,
-});
+const mapLinkRow = (row, columns = defaultSupabaseSchema.links.columns) => {
+  const rawNotes = getColumnName(row, columns.notes);
+  const fallback = decodeLinkFallback(typeof rawNotes === "string" ? rawNotes : null);
+  const resolvedNotes = (() => {
+    const value = typeof rawNotes === "string" ? rawNotes : rawNotes ?? "";
+    if (fallback && typeof value === "string" && value.trim().startsWith("{")) {
+      return fallback.notes ?? "";
+    }
+    if (fallback?.notes && !value) {
+      return fallback.notes;
+    }
+    return value;
+  })();
+  const resolvedReference = fallback?.reference ?? null;
+  const deletedAt = getColumnName(row, columns.deleted_at) ?? fallback?.deleted_at ?? null;
+  return {
+    id: getColumnName(row, columns.id),
+    name: getColumnName(row, columns.name),
+    url: getColumnName(row, columns.url),
+    notes: resolvedNotes,
+    uploader: getColumnName(row, columns.uploader) ?? "Unknown",
+    uploaderEmail: getColumnName(row, columns.uploader_email) ?? "",
+    createdAt: getColumnName(row, columns.created_at) ?? new Date().toISOString(),
+    deletedAt,
+    referenceName: getColumnName(row, columns.reference_name) ?? resolvedReference?.name ?? "",
+    referenceMime: getColumnName(row, columns.reference_mime) ?? resolvedReference?.mime ?? "",
+    referenceSize: Number(
+      getColumnName(row, columns.reference_size) ?? resolvedReference?.size ?? 0
+    ),
+    referenceContent:
+      getColumnName(row, columns.reference_content) ?? resolvedReference?.content ?? null,
+    fallbackData: fallback,
+  };
+};
 
-const mapScriptRow = (row, columns = defaultSupabaseSchema.scripts.columns) => ({
-  id: getColumnName(row, columns.id),
-  type: getColumnName(row, columns.type),
-  name: getColumnName(row, columns.name),
-  notes: getColumnName(row, columns.notes) ?? "",
-  uploader: getColumnName(row, columns.uploader) ?? "Unknown",
-  uploaderEmail: getColumnName(row, columns.uploader_email) ?? "",
-  createdAt: getColumnName(row, columns.created_at) ?? new Date().toISOString(),
-  parentId: getColumnName(row, columns.parent_id) ?? null,
-  mimeType:
-    getColumnName(row, columns.file_mime) ??
-    (getColumnName(row, columns.type) === "folder" ? "" : "application/octet-stream"),
-  size: Number(getColumnName(row, columns.file_size) ?? 0),
-  originalName: getColumnName(row, columns.original_name) ?? getColumnName(row, columns.name),
-  content: getColumnName(row, columns.file_content) ?? null,
-  deletedAt: getColumnName(row, columns.deleted_at) ?? null,
-  referenceName: getColumnName(row, columns.reference_name) ?? "",
-  referenceMime: getColumnName(row, columns.reference_mime) ?? "",
-  referenceSize: Number(getColumnName(row, columns.reference_size) ?? 0),
-  referenceContent: getColumnName(row, columns.reference_content) ?? null,
-});
+const mapScriptRow = (row, columns = defaultSupabaseSchema.scripts.columns) => {
+  const rawNotes = getColumnName(row, columns.notes);
+  const fallback = decodeScriptFallback(typeof rawNotes === "string" ? rawNotes : null);
+  const resolvedNotes = (() => {
+    const value = typeof rawNotes === "string" ? rawNotes : rawNotes ?? "";
+    if (fallback && typeof value === "string" && value.trim().startsWith("{")) {
+      return fallback.notes ?? "";
+    }
+    if (fallback?.notes && !value) {
+      return fallback.notes;
+    }
+    return value;
+  })();
+  const resolvedReference = fallback?.reference ?? null;
+  const deletedAt = getColumnName(row, columns.deleted_at) ?? fallback?.deleted_at ?? null;
+  return {
+    id: getColumnName(row, columns.id),
+    type: getColumnName(row, columns.type),
+    name: getColumnName(row, columns.name),
+    notes: resolvedNotes,
+    uploader: getColumnName(row, columns.uploader) ?? "Unknown",
+    uploaderEmail: getColumnName(row, columns.uploader_email) ?? "",
+    createdAt: getColumnName(row, columns.created_at) ?? new Date().toISOString(),
+    parentId: getColumnName(row, columns.parent_id) ?? null,
+    mimeType:
+      getColumnName(row, columns.file_mime) ??
+      (getColumnName(row, columns.type) === "folder" ? "" : "application/octet-stream"),
+    size: Number(getColumnName(row, columns.file_size) ?? 0),
+    originalName: getColumnName(row, columns.original_name) ?? getColumnName(row, columns.name),
+    content: getColumnName(row, columns.file_content) ?? null,
+    deletedAt,
+    referenceName: getColumnName(row, columns.reference_name) ?? resolvedReference?.name ?? "",
+    referenceMime: getColumnName(row, columns.reference_mime) ?? resolvedReference?.mime ?? "",
+    referenceSize: Number(
+      getColumnName(row, columns.reference_size) ?? resolvedReference?.size ?? 0
+    ),
+    referenceContent:
+      getColumnName(row, columns.reference_content) ?? resolvedReference?.content ?? null,
+    fallbackData: fallback,
+  };
+};
 
 const buildSupabaseSchemaMapping = (rows = []) => {
   const byTable = new Map();
@@ -1763,7 +2066,11 @@ export default function App() {
         reference_content: referenceData?.content ?? null,
       };
       const entry = await executeSupabase("links", async (schema) => {
-        const shapedPayload = shapeSupabasePayload(schema.links, payload);
+        const shapedPayload = applyLinkFallbackColumns(
+          schema.links,
+          shapeSupabasePayload(schema.links, payload),
+          payload
+        );
         updateUploadProgress("links", progressId, {
           label: "Uploading to Supabase…",
           value: 45,
@@ -1950,16 +2257,20 @@ export default function App() {
           deleted_at: null,
           reference_name: referenceData?.name ?? null,
           reference_mime: referenceData?.mime ?? null,
-          reference_size: referenceData?.size ?? null,
-          reference_content: referenceData?.content ?? null,
-        };
-        const entry = await executeSupabase("scripts", async (schema) => {
-          const shapedPayload = shapeSupabasePayload(schema.scripts, payload);
-          updateUploadProgress("scripts", progressId, {
-            label: "Uploading to Supabase…",
-            value: 55,
-          });
-          const data = await supabaseRequest(schema.scripts.table, {
+        reference_size: referenceData?.size ?? null,
+        reference_content: referenceData?.content ?? null,
+      };
+      const entry = await executeSupabase("scripts", async (schema) => {
+        const shapedPayload = applyScriptFallbackColumns(
+          schema.scripts,
+          shapeSupabasePayload(schema.scripts, payload),
+          payload
+        );
+        updateUploadProgress("scripts", progressId, {
+          label: "Uploading to Supabase…",
+          value: 55,
+        });
+        const data = await supabaseRequest(schema.scripts.table, {
             method: "POST",
             headers: { Prefer: "return=representation" },
             body: JSON.stringify([shapedPayload]),
@@ -2000,7 +2311,13 @@ export default function App() {
         },
       });
       const inserted = await executeSupabase("scripts", async (schema) => {
-        const shapedRows = rows.map((row) => shapeSupabasePayload(schema.scripts, row));
+        const shapedRows = rows.map((row) =>
+          applyScriptFallbackColumns(
+            schema.scripts,
+            shapeSupabasePayload(schema.scripts, row),
+            row
+          )
+        );
         updateUploadProgress("scripts", progressId, {
           label: "Uploading to Supabase…",
           value: 75,
@@ -2117,16 +2434,43 @@ export default function App() {
         ids.forEach((id) => idsToClear.add(id));
         const deletedAt = permanent ? null : new Date().toISOString();
         await executeSupabase("prompts", async (schema) => {
-          const path = buildInFilterPath(schema.prompts, "id", Array.from(ids));
+          const config = schema.prompts;
+          const path = buildInFilterPath(config, "id", Array.from(ids));
           if (permanent) {
             await supabaseRequest(path, { method: "DELETE" });
             return;
           }
-          const payload = shapeSupabasePayload(schema.prompts, { deleted_at: deletedAt });
-          await supabaseRequest(path, {
-            method: "PATCH",
-            body: JSON.stringify(payload),
-          });
+          const basePayload = shapeSupabasePayload(config, { deleted_at: deletedAt });
+          const needsFallback = !config?.columns?.deleted_at || !Object.keys(basePayload).length;
+          if (!needsFallback) {
+            await supabaseRequest(path, {
+              method: "PATCH",
+              body: JSON.stringify(basePayload),
+            });
+            return;
+          }
+          for (const entry of targets) {
+            if (!entry?.id) continue;
+            const canonical = {
+              deleted_at: deletedAt,
+              description: entry.description,
+              notes: entry.notes,
+              reference_name: entry.referenceName ?? null,
+              reference_mime: entry.referenceMime ?? null,
+              reference_size: entry.referenceSize ?? null,
+              reference_content: entry.referenceContent ?? null,
+            };
+            const shaped = applyPromptFallbackColumns(
+              config,
+              shapeSupabasePayload(config, canonical),
+              canonical,
+              entry.fallbackData
+            );
+            await supabaseRequest(buildFilterPath(config, "id", entry.id), {
+              method: "PATCH",
+              body: JSON.stringify(shaped),
+            });
+          }
         });
         if (permanent) {
           setTrashedPrompts((prev) => prev.filter((entry) => !ids.has(entry.id)));
@@ -2148,16 +2492,42 @@ export default function App() {
         ids.forEach((id) => idsToClear.add(id));
         const deletedAt = permanent ? null : new Date().toISOString();
         await executeSupabase("links", async (schema) => {
-          const path = buildInFilterPath(schema.links, "id", Array.from(ids));
+          const config = schema.links;
+          const path = buildInFilterPath(config, "id", Array.from(ids));
           if (permanent) {
             await supabaseRequest(path, { method: "DELETE" });
             return;
           }
-          const payload = shapeSupabasePayload(schema.links, { deleted_at: deletedAt });
-          await supabaseRequest(path, {
-            method: "PATCH",
-            body: JSON.stringify(payload),
-          });
+          const basePayload = shapeSupabasePayload(config, { deleted_at: deletedAt });
+          const needsFallback = !config?.columns?.deleted_at || !Object.keys(basePayload).length;
+          if (!needsFallback) {
+            await supabaseRequest(path, {
+              method: "PATCH",
+              body: JSON.stringify(basePayload),
+            });
+            return;
+          }
+          for (const entry of targets) {
+            if (!entry?.id) continue;
+            const canonical = {
+              deleted_at: deletedAt,
+              notes: entry.notes,
+              reference_name: entry.referenceName ?? null,
+              reference_mime: entry.referenceMime ?? null,
+              reference_size: entry.referenceSize ?? null,
+              reference_content: entry.referenceContent ?? null,
+            };
+            const shaped = applyLinkFallbackColumns(
+              config,
+              shapeSupabasePayload(config, canonical),
+              canonical,
+              entry.fallbackData
+            );
+            await supabaseRequest(buildFilterPath(config, "id", entry.id), {
+              method: "PATCH",
+              body: JSON.stringify(shaped),
+            });
+          }
         });
         if (permanent) {
           setTrashedLinks((prev) => prev.filter((entry) => !ids.has(entry.id)));
@@ -2186,15 +2556,43 @@ export default function App() {
         if (idValues.length) {
           const deletedAt = permanent ? null : new Date().toISOString();
           await executeSupabase("scripts", async (schema) => {
-            const filter = buildInFilterPath(schema.scripts, "id", idValues);
+            const config = schema.scripts;
+            const filter = buildInFilterPath(config, "id", idValues);
             if (permanent) {
               await supabaseRequest(filter, { method: "DELETE" });
             } else {
-              const payload = shapeSupabasePayload(schema.scripts, { deleted_at: deletedAt });
-              await supabaseRequest(filter, {
-                method: "PATCH",
-                body: JSON.stringify(payload),
-              });
+              const basePayload = shapeSupabasePayload(config, { deleted_at: deletedAt });
+              const needsFallback = !config?.columns?.deleted_at || !Object.keys(basePayload).length;
+              if (!needsFallback) {
+                await supabaseRequest(filter, {
+                  method: "PATCH",
+                  body: JSON.stringify(basePayload),
+                });
+              } else {
+                const source = permanent ? trashedScripts : scripts;
+                for (const value of idValues) {
+                  const entry = source.find((item) => item.id === value) ?? scriptsById.get(value);
+                  if (!entry) continue;
+                  const canonical = {
+                    deleted_at: deletedAt,
+                    notes: entry.notes,
+                    reference_name: entry.referenceName ?? null,
+                    reference_mime: entry.referenceMime ?? null,
+                    reference_size: entry.referenceSize ?? null,
+                    reference_content: entry.referenceContent ?? null,
+                  };
+                  const shaped = applyScriptFallbackColumns(
+                    config,
+                    shapeSupabasePayload(config, canonical),
+                    canonical,
+                    entry.fallbackData
+                  );
+                  await supabaseRequest(buildFilterPath(config, "id", value), {
+                    method: "PATCH",
+                    body: JSON.stringify(shaped),
+                  });
+                }
+              }
             }
           });
           if (permanent) {
@@ -2240,10 +2638,35 @@ export default function App() {
 
       if (category === "prompts") {
         await executeSupabase("prompts", async (schema) => {
-          const payload = shapeSupabasePayload(schema.prompts, { deleted_at: null });
-          await supabaseRequest(buildFilterPath(schema.prompts, "id", item.id), {
+          const config = schema.prompts;
+          const path = buildFilterPath(config, "id", item.id);
+          const basePayload = shapeSupabasePayload(config, { deleted_at: null });
+          const needsFallback = !config?.columns?.deleted_at || !Object.keys(basePayload).length;
+          if (!needsFallback) {
+            await supabaseRequest(path, {
+              method: "PATCH",
+              body: JSON.stringify(basePayload),
+            });
+            return;
+          }
+          const canonical = {
+            deleted_at: null,
+            description: item.description,
+            notes: item.notes,
+            reference_name: item.referenceName ?? null,
+            reference_mime: item.referenceMime ?? null,
+            reference_size: item.referenceSize ?? null,
+            reference_content: item.referenceContent ?? null,
+          };
+          const shaped = applyPromptFallbackColumns(
+            config,
+            shapeSupabasePayload(config, canonical),
+            canonical,
+            item.fallbackData
+          );
+          await supabaseRequest(path, {
             method: "PATCH",
-            body: JSON.stringify(payload),
+            body: JSON.stringify(shaped),
           });
         });
         const { category: _omit, ...restored } = { ...item, deletedAt: null };
@@ -2255,10 +2678,34 @@ export default function App() {
         });
       } else if (category === "links") {
         await executeSupabase("links", async (schema) => {
-          const payload = shapeSupabasePayload(schema.links, { deleted_at: null });
-          await supabaseRequest(buildFilterPath(schema.links, "id", item.id), {
+          const config = schema.links;
+          const path = buildFilterPath(config, "id", item.id);
+          const basePayload = shapeSupabasePayload(config, { deleted_at: null });
+          const needsFallback = !config?.columns?.deleted_at || !Object.keys(basePayload).length;
+          if (!needsFallback) {
+            await supabaseRequest(path, {
+              method: "PATCH",
+              body: JSON.stringify(basePayload),
+            });
+            return;
+          }
+          const canonical = {
+            deleted_at: null,
+            notes: item.notes,
+            reference_name: item.referenceName ?? null,
+            reference_mime: item.referenceMime ?? null,
+            reference_size: item.referenceSize ?? null,
+            reference_content: item.referenceContent ?? null,
+          };
+          const shaped = applyLinkFallbackColumns(
+            config,
+            shapeSupabasePayload(config, canonical),
+            canonical,
+            item.fallbackData
+          );
+          await supabaseRequest(path, {
             method: "PATCH",
-            body: JSON.stringify(payload),
+            body: JSON.stringify(shaped),
           });
         });
         const { category: _omit, ...restored } = { ...item, deletedAt: null };
@@ -2276,14 +2723,39 @@ export default function App() {
           .join(",");
         const encodedValues = encodeURIComponent(`(${idList})`);
         await executeSupabase("scripts", async (schema) => {
-          const payload = shapeSupabasePayload(schema.scripts, { deleted_at: null });
-          await supabaseRequest(
-            `${schema.scripts.table}?${encodeURIComponent(idColumn)}=in.${encodedValues}`,
-            {
+          const config = schema.scripts;
+          const path = `${config.table}?${encodeURIComponent(idColumn)}=in.${encodedValues}`;
+          const basePayload = shapeSupabasePayload(config, { deleted_at: null });
+          const needsFallback = !config?.columns?.deleted_at || !Object.keys(basePayload).length;
+          if (!needsFallback) {
+            await supabaseRequest(path, {
               method: "PATCH",
-              body: JSON.stringify(payload),
-            }
-          );
+              body: JSON.stringify(basePayload),
+            });
+            return;
+          }
+          for (const value of ids) {
+            const entry = trashedScriptsById.get(value);
+            if (!entry) continue;
+            const canonical = {
+              deleted_at: null,
+              notes: entry.notes,
+              reference_name: entry.referenceName ?? null,
+              reference_mime: entry.referenceMime ?? null,
+              reference_size: entry.referenceSize ?? null,
+              reference_content: entry.referenceContent ?? null,
+            };
+            const shaped = applyScriptFallbackColumns(
+              config,
+              shapeSupabasePayload(config, canonical),
+              canonical,
+              entry.fallbackData
+            );
+            await supabaseRequest(buildFilterPath(config, "id", value), {
+              method: "PATCH",
+              body: JSON.stringify(shaped),
+            });
+          }
         });
         const restoredEntries = Array.from(ids)
           .map((id) => trashedScriptsById.get(id))
@@ -2630,11 +3102,20 @@ export default function App() {
       if (editingItem.category === "prompts") {
         const description = String(form.get("description") || "").trim();
         await executeSupabase("prompts", async (schema) => {
-          const canonical = { name, description, notes };
+          const canonical = {
+            name,
+            description,
+            notes,
+            reference_name: editingItem.item.referenceName ?? null,
+            reference_mime: editingItem.item.referenceMime ?? null,
+            reference_size: editingItem.item.referenceSize ?? null,
+            reference_content: editingItem.item.referenceContent ?? null,
+          };
           const updatePayload = applyPromptFallbackColumns(
             schema.prompts,
             shapeSupabasePayload(schema.prompts, canonical),
-            canonical
+            canonical,
+            editingItem.item.fallbackData
           );
           await supabaseRequest(buildFilterPath(schema.prompts, "id", editingItem.item.id), {
             method: "PATCH",
@@ -2650,11 +3131,21 @@ export default function App() {
       } else if (editingItem.category === "links") {
         const url = String(form.get("url") || "").trim();
         await executeSupabase("links", async (schema) => {
-          const updatePayload = shapeSupabasePayload(schema.links, {
+          const canonical = {
             name,
             url,
             notes,
-          });
+            reference_name: editingItem.item.referenceName ?? null,
+            reference_mime: editingItem.item.referenceMime ?? null,
+            reference_size: editingItem.item.referenceSize ?? null,
+            reference_content: editingItem.item.referenceContent ?? null,
+          };
+          const updatePayload = applyLinkFallbackColumns(
+            schema.links,
+            shapeSupabasePayload(schema.links, canonical),
+            canonical,
+            editingItem.item.fallbackData
+          );
           await supabaseRequest(buildFilterPath(schema.links, "id", editingItem.item.id), {
             method: "PATCH",
             headers: { Prefer: "return=representation" },
@@ -2666,10 +3157,20 @@ export default function App() {
         );
       } else if (editingItem.category === "scripts") {
         await executeSupabase("scripts", async (schema) => {
-          const updatePayload = shapeSupabasePayload(schema.scripts, {
+          const canonical = {
             name,
             notes,
-          });
+            reference_name: editingItem.item.referenceName ?? null,
+            reference_mime: editingItem.item.referenceMime ?? null,
+            reference_size: editingItem.item.referenceSize ?? null,
+            reference_content: editingItem.item.referenceContent ?? null,
+          };
+          const updatePayload = applyScriptFallbackColumns(
+            schema.scripts,
+            shapeSupabasePayload(schema.scripts, canonical),
+            canonical,
+            editingItem.item.fallbackData
+          );
           await supabaseRequest(buildFilterPath(schema.scripts, "id", editingItem.item.id), {
             method: "PATCH",
             headers: { Prefer: "return=representation" },
