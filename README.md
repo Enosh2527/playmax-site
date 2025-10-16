@@ -74,7 +74,11 @@ VaultHub now uses [Supabase](https://supabase.com) as its zero-cost cloud vault.
      notes text,
      uploader text,
      uploader_email text,
-     created_at timestamptz default now()
+     created_at timestamptz default now(),
+     reference_name text,
+     reference_mime text,
+     reference_size bigint,
+     reference_content text
    );
 
    create table if not exists public.links (
@@ -84,7 +88,11 @@ VaultHub now uses [Supabase](https://supabase.com) as its zero-cost cloud vault.
      notes text,
      uploader text,
      uploader_email text,
-     created_at timestamptz default now()
+     created_at timestamptz default now(),
+     reference_name text,
+     reference_mime text,
+     reference_size bigint,
+     reference_content text
    );
 
    create table if not exists public.scripts (
@@ -99,11 +107,15 @@ VaultHub now uses [Supabase](https://supabase.com) as its zero-cost cloud vault.
      parent_id uuid,
      file_mime text,
      file_size bigint,
-     file_content text
+     file_content text,
+     reference_name text,
+     reference_mime text,
+     reference_size bigint,
+     reference_content text
    );
    ```
 
-   The app stores script files and folders in this table. Files are base64 encoded and remain lightweight enough for Supabase's free limits. The `allowed_emails` table keeps your access list in sync across devices so anyone you approve from the Admin Control Room can register and start uploading straight away.
+   The app stores script files and folders in this table. Files are base64 encoded (along with optional reference attachments) and remain lightweight enough for Supabase's free limits. The `reference_*` columns let you attach screenshots, docs, or other helpers to any prompt, link, or script entry. The `allowed_emails` table keeps your access list in sync across devices so anyone you approve from the Admin Control Room can register and start uploading straight away.
 3. Open **Project Settings → API** and copy the **Project URL** and **anon public key**.
 4. Create a `.env.local` file with those values so the front-end can talk to your project. You can paste the API URL, the dashboard URL, or just the project ref — the app normalises each format automatically:
 

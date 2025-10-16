@@ -211,6 +211,22 @@ function base64ToUint8Array(base64) {
   return bytes;
 }
 
+async function prepareReferenceFile(file) {
+  if (!file || typeof file !== "object" || typeof file.arrayBuffer !== "function") {
+    return null;
+  }
+  if (!file.size) {
+    return null;
+  }
+  const buffer = await file.arrayBuffer();
+  return {
+    name: file.name || "reference",
+    mime: file.type || "application/octet-stream",
+    size: Number(file.size || 0),
+    content: arrayBufferToBase64(buffer),
+  };
+}
+
 const CRC_TABLE = new Uint32Array(256);
 for (let n = 0; n < 256; n++) {
   let c = n;
@@ -329,6 +345,25 @@ function safeFileName(name, extension = "") {
   return `${cleaned || "untitled"}${ext}`;
 }
 
+function formatFileSize(bytes) {
+  const value = Number(bytes);
+  if (Number.isNaN(value) || value < 0) {
+    return "Unknown size";
+  }
+  if (value === 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = value;
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index += 1;
+  }
+  const precision = size >= 10 || index === 0 ? 0 : 1;
+  return `${size.toFixed(precision)} ${units[index]}`;
+}
+
 function formatDateTime(iso) {
   const date = new Date(iso);
   return date.toLocaleString(undefined, {
@@ -398,6 +433,7 @@ function EmptyState({ icon: Icon, title, description }) {
 
 const ALLOWED_EMAILS_KEY = "vaulthub-allowed-emails";
 const USERS_KEY = "vaulthub-users";
+const CURRENT_USER_KEY = "vaulthub-active-user";
 
 const defaultSupabaseSchema = {
   allowed_emails: {
@@ -419,6 +455,10 @@ const defaultSupabaseSchema = {
       uploader_email: "uploader_email",
       created_at: "created_at",
       deleted_at: "deleted_at",
+      reference_name: "reference_name",
+      reference_mime: "reference_mime",
+      reference_size: "reference_size",
+      reference_content: "reference_content",
     },
   },
   links: {
@@ -432,6 +472,10 @@ const defaultSupabaseSchema = {
       uploader_email: "uploader_email",
       created_at: "created_at",
       deleted_at: "deleted_at",
+      reference_name: "reference_name",
+      reference_mime: "reference_mime",
+      reference_size: "reference_size",
+      reference_content: "reference_content",
     },
   },
   scripts: {
@@ -450,6 +494,10 @@ const defaultSupabaseSchema = {
       file_size: "file_size",
       file_content: "file_content",
       deleted_at: "deleted_at",
+      reference_name: "reference_name",
+      reference_mime: "reference_mime",
+      reference_size: "reference_size",
+      reference_content: "reference_content",
     },
   },
 };
@@ -470,12 +518,31 @@ const columnSynonyms = {
   file_mime: ["mime", "mimetype", "content_type"],
   file_size: ["size", "filesize", "content_length"],
   file_content: ["content", "data", "payload"],
+  reference_name: ["reference", "reference_name", "helper_file"],
+  reference_mime: ["reference_mime", "helper_mime"],
+  reference_size: ["reference_size", "helper_size"],
+  reference_content: ["reference_content", "helper_content", "reference_data"],
 };
 
 const optionalColumns = {
   allowed_emails: new Set(["role", "created_at"]),
-  prompts: new Set(["description", "notes", "deleted_at"]),
-  links: new Set(["notes", "deleted_at"]),
+  prompts: new Set([
+    "description",
+    "notes",
+    "deleted_at",
+    "reference_name",
+    "reference_mime",
+    "reference_size",
+    "reference_content",
+  ]),
+  links: new Set([
+    "notes",
+    "deleted_at",
+    "reference_name",
+    "reference_mime",
+    "reference_size",
+    "reference_content",
+  ]),
   scripts: new Set([
     "notes",
     "original_name",
@@ -484,6 +551,10 @@ const optionalColumns = {
     "file_size",
     "file_content",
     "deleted_at",
+    "reference_name",
+    "reference_mime",
+    "reference_size",
+    "reference_content",
   ]),
 };
 
@@ -607,6 +678,10 @@ const mapPromptRow = (row, columns = defaultSupabaseSchema.prompts.columns) => (
   uploaderEmail: getColumnName(row, columns.uploader_email) ?? "",
   createdAt: getColumnName(row, columns.created_at) ?? new Date().toISOString(),
   deletedAt: getColumnName(row, columns.deleted_at) ?? null,
+  referenceName: getColumnName(row, columns.reference_name) ?? "",
+  referenceMime: getColumnName(row, columns.reference_mime) ?? "",
+  referenceSize: Number(getColumnName(row, columns.reference_size) ?? 0),
+  referenceContent: getColumnName(row, columns.reference_content) ?? null,
 });
 
 const mapLinkRow = (row, columns = defaultSupabaseSchema.links.columns) => ({
@@ -618,6 +693,10 @@ const mapLinkRow = (row, columns = defaultSupabaseSchema.links.columns) => ({
   uploaderEmail: getColumnName(row, columns.uploader_email) ?? "",
   createdAt: getColumnName(row, columns.created_at) ?? new Date().toISOString(),
   deletedAt: getColumnName(row, columns.deleted_at) ?? null,
+  referenceName: getColumnName(row, columns.reference_name) ?? "",
+  referenceMime: getColumnName(row, columns.reference_mime) ?? "",
+  referenceSize: Number(getColumnName(row, columns.reference_size) ?? 0),
+  referenceContent: getColumnName(row, columns.reference_content) ?? null,
 });
 
 const mapScriptRow = (row, columns = defaultSupabaseSchema.scripts.columns) => ({
@@ -636,6 +715,10 @@ const mapScriptRow = (row, columns = defaultSupabaseSchema.scripts.columns) => (
   originalName: getColumnName(row, columns.original_name) ?? getColumnName(row, columns.name),
   content: getColumnName(row, columns.file_content) ?? null,
   deletedAt: getColumnName(row, columns.deleted_at) ?? null,
+  referenceName: getColumnName(row, columns.reference_name) ?? "",
+  referenceMime: getColumnName(row, columns.reference_mime) ?? "",
+  referenceSize: Number(getColumnName(row, columns.reference_size) ?? 0),
+  referenceContent: getColumnName(row, columns.reference_content) ?? null,
 });
 
 const buildSupabaseSchemaMapping = (rows = []) => {
@@ -831,6 +914,7 @@ export default function App() {
   const [scriptFiles, setScriptFiles] = useState([]);
   const [scriptFolderFiles, setScriptFolderFiles] = useState([]);
 
+  const sessionHydratedRef = useRef(false);
   const folderInputRef = useRef(null);
   const contextMenuRef = useRef(null);
 
@@ -973,6 +1057,36 @@ export default function App() {
     }
     return "border-[#58a6ff]/40 bg-[#0b2f53] text-[#9cc4ff]";
   }, [supabaseReady, vaultError]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    if (sessionHydratedRef.current) {
+      return;
+    }
+    const storedEmail = window.localStorage.getItem(CURRENT_USER_KEY);
+    sessionHydratedRef.current = true;
+    if (!storedEmail) {
+      return;
+    }
+    const normalized = storedEmail.toLowerCase();
+    const existing = users.find((user) => user.email.toLowerCase() === normalized);
+    if (existing) {
+      setCurrentUser(existing);
+    }
+  }, [users]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    if (currentUser) {
+      window.localStorage.setItem(CURRENT_USER_KEY, currentUser.email.toLowerCase());
+    } else {
+      window.localStorage.removeItem(CURRENT_USER_KEY);
+    }
+  }, [currentUser]);
 
   useEffect(() => {
     const node = folderInputRef.current;
@@ -1472,6 +1586,10 @@ export default function App() {
     const name = String(form.get("name") || "").trim();
     const description = String(form.get("description") || "").trim();
     const notes = String(form.get("notes") || "").trim();
+    const referenceFile = form.get("reference");
+    const hasReference =
+      referenceFile && typeof referenceFile === "object" && "size" in referenceFile && referenceFile.size;
+    const referenceData = hasReference ? await prepareReferenceFile(referenceFile) : null;
     if (!name) return;
     const createdAt = new Date().toISOString();
     let progressId = null;
@@ -1489,6 +1607,10 @@ export default function App() {
         uploader_email: currentUser.email,
         created_at: createdAt,
         deleted_at: null,
+        reference_name: referenceData?.name ?? null,
+        reference_mime: referenceData?.mime ?? null,
+        reference_size: referenceData?.size ?? null,
+        reference_content: referenceData?.content ?? null,
       };
       const entry = await executeSupabase("prompts", async (schema) => {
         const shapedPayload = shapeSupabasePayload(schema.prompts, payload);
@@ -1531,6 +1653,10 @@ export default function App() {
     const name = String(form.get("name") || "").trim();
     const url = String(form.get("url") || "").trim();
     const notes = String(form.get("notes") || "").trim();
+    const referenceFile = form.get("reference");
+    const hasReference =
+      referenceFile && typeof referenceFile === "object" && "size" in referenceFile && referenceFile.size;
+    const referenceData = hasReference ? await prepareReferenceFile(referenceFile) : null;
     if (!name || !url) return;
     const createdAt = new Date().toISOString();
     let progressId = null;
@@ -1548,6 +1674,10 @@ export default function App() {
         uploader_email: currentUser.email,
         created_at: createdAt,
         deleted_at: null,
+        reference_name: referenceData?.name ?? null,
+        reference_mime: referenceData?.mime ?? null,
+        reference_size: referenceData?.size ?? null,
+        reference_content: referenceData?.content ?? null,
       };
       const entry = await executeSupabase("links", async (schema) => {
         const shapedPayload = shapeSupabasePayload(schema.links, payload);
@@ -1589,6 +1719,7 @@ export default function App() {
     createdAt,
     parentLogicalId,
     onProgress,
+    reference,
   }) => {
     const rows = [];
     const rootId = crypto.randomUUID();
@@ -1614,6 +1745,10 @@ export default function App() {
       created_at: createdAt,
       parent_id: parentLogicalId,
       deleted_at: null,
+      reference_name: reference?.name ?? null,
+      reference_mime: reference?.mime ?? null,
+      reference_size: reference?.size ?? null,
+      reference_content: reference?.content ?? null,
     };
     rows.push(rootRow);
     const pathToFolderId = new Map();
@@ -1635,21 +1770,25 @@ export default function App() {
           const folderId = crypto.randomUUID();
           const parentPath = currentPath.split("/").slice(0, -1).join("/");
           const folderParentId = parentPath ? pathToFolderId.get(parentPath) : rootId;
-          rows.push({
-            id: folderId,
-            type: "folder",
-            name: segment,
-            original_name: segment,
-            file_mime: "",
-            file_size: 0,
-            file_content: null,
-            notes,
-            uploader: currentUser.name,
-            uploader_email: currentUser.email,
-            created_at: createdAt,
-            parent_id: folderParentId,
-            deleted_at: null,
-          });
+      rows.push({
+        id: folderId,
+        type: "folder",
+        name: segment,
+        original_name: segment,
+        file_mime: "",
+        file_size: 0,
+        file_content: null,
+        notes,
+        uploader: currentUser.name,
+        uploader_email: currentUser.email,
+        created_at: createdAt,
+        parent_id: folderParentId,
+        deleted_at: null,
+        reference_name: null,
+        reference_mime: null,
+        reference_size: null,
+        reference_content: null,
+      });
           pathToFolderId.set(currentPath, folderId);
         }
       }
@@ -1670,6 +1809,10 @@ export default function App() {
         created_at: createdAt,
         parent_id: folderId,
         deleted_at: null,
+        reference_name: null,
+        reference_mime: null,
+        reference_size: null,
+        reference_content: null,
       });
       processedBytes += Number(file.size || 0);
       reportProgress(file.name);
@@ -1685,6 +1828,10 @@ export default function App() {
     const form = new FormData(formElement);
     const name = String(form.get("name") || "").trim();
     const notes = String(form.get("notes") || "").trim();
+    const referenceFile = form.get("reference");
+    const hasReference =
+      referenceFile && typeof referenceFile === "object" && "size" in referenceFile && referenceFile.size;
+    const referenceData = hasReference ? await prepareReferenceFile(referenceFile) : null;
     const createdAt = new Date().toISOString();
     const parentLogicalId = currentScriptFolderId ?? null;
     let progressId = null;
@@ -1717,6 +1864,10 @@ export default function App() {
           parent_id: parentLogicalId,
           file_content: arrayBufferToBase64(buffer),
           deleted_at: null,
+          reference_name: referenceData?.name ?? null,
+          reference_mime: referenceData?.mime ?? null,
+          reference_size: referenceData?.size ?? null,
+          reference_content: referenceData?.content ?? null,
         };
         const entry = await executeSupabase("scripts", async (schema) => {
           const shapedPayload = shapeSupabasePayload(schema.scripts, payload);
@@ -1752,6 +1903,7 @@ export default function App() {
         notes,
         createdAt,
         parentLogicalId,
+        reference: referenceData,
         onProgress: ({ processedBytes, totalBytes, fileName }) => {
           if (!progressId) return;
           const portion = totalBytes ? processedBytes / totalBytes : 1;
@@ -2082,21 +2234,46 @@ export default function App() {
   };
 
   const gatherScriptEntries = useCallback(
-    async (item, prefixSegments = []) => {
+    async (item, prefixSegments = [], seenDirectories = new Set()) => {
       const entries = [];
       const pathSegments = [...prefixSegments, item.name];
       if (item.type === "folder") {
-        entries.push({
-          path: `${pathSegments.join("/")}/`,
-          data: new Uint8Array(0),
-          crc: 0,
-          isDirectory: true,
-          date: new Date(item.createdAt),
-          externalAttr: 0x10 << 16,
-        });
+        const folderPath = `${pathSegments.join("/")}/`;
+        if (!seenDirectories.has(folderPath)) {
+          entries.push({
+            path: folderPath,
+            data: new Uint8Array(0),
+            crc: 0,
+            isDirectory: true,
+            date: new Date(item.createdAt),
+            externalAttr: 0x10 << 16,
+          });
+          seenDirectories.add(folderPath);
+        }
+        if (item.referenceContent && item.referenceName) {
+          const referenceDirPath = `${[...pathSegments, "Reference"].join("/")}/`;
+          if (!seenDirectories.has(referenceDirPath)) {
+            entries.push({
+              path: referenceDirPath,
+              data: new Uint8Array(0),
+              crc: 0,
+              isDirectory: true,
+              date: new Date(item.createdAt),
+              externalAttr: 0x10 << 16,
+            });
+            seenDirectories.add(referenceDirPath);
+          }
+          const refBuffer = base64ToUint8Array(item.referenceContent);
+          entries.push({
+            path: [...pathSegments, "Reference", item.referenceName].join("/"),
+            data: refBuffer,
+            crc: crc32(refBuffer),
+            date: new Date(item.createdAt),
+          });
+        }
         const children = scripts.filter((child) => child.parentId === item.id);
         for (const child of children) {
-          const childEntries = await gatherScriptEntries(child, pathSegments);
+          const childEntries = await gatherScriptEntries(child, pathSegments, seenDirectories);
           entries.push(...childEntries);
         }
         return entries;
@@ -2108,6 +2285,28 @@ export default function App() {
         crc: crc32(buffer),
         date: new Date(item.createdAt),
       });
+      if (item.referenceContent && item.referenceName) {
+        const parentSegments = pathSegments.slice(0, -1);
+        const referenceDirPath = `${[...parentSegments, "Reference"].join("/")}/`;
+        if (!seenDirectories.has(referenceDirPath)) {
+          entries.push({
+            path: referenceDirPath,
+            data: new Uint8Array(0),
+            crc: 0,
+            isDirectory: true,
+            date: new Date(item.createdAt),
+            externalAttr: 0x10 << 16,
+          });
+          seenDirectories.add(referenceDirPath);
+        }
+        const refBuffer = base64ToUint8Array(item.referenceContent);
+        entries.push({
+          path: [...parentSegments, "Reference", item.referenceName].join("/"),
+          data: refBuffer,
+          crc: crc32(refBuffer),
+          date: new Date(item.createdAt),
+        });
+      }
       return entries;
     },
     [scripts]
@@ -2121,6 +2320,24 @@ export default function App() {
     { ext: "py", label: "Python (.py)", mime: "text/x-python" },
   ];
 
+  const downloadReferenceAttachment = (item) => {
+    if (!item?.referenceContent || !item?.referenceName) {
+      return false;
+    }
+    try {
+      const buffer = base64ToUint8Array(item.referenceContent);
+      const blob = new Blob([buffer], {
+        type: item.referenceMime || "application/octet-stream",
+      });
+      downloadBlob(blob, item.referenceName);
+      return true;
+    } catch (error) {
+      console.error("Failed to download reference attachment", error);
+      setVaultError("Unable to download the reference attachment. Please try again.");
+      return false;
+    }
+  };
+
   const handleDownload = async (category, item, options = {}) => {
     if (category === "links" && !options.format) {
       setLinkDownloadTarget({ category, item });
@@ -2131,6 +2348,7 @@ export default function App() {
       if (category === "prompts") {
         const content = `Name: ${item.name}\nDescription: ${item.description || "-"}\nNotes: ${item.notes || "-"}\nUploaded by: ${item.uploader} (${item.uploaderEmail})`;
         downloadBlob(new Blob([content], { type: "text/plain" }), safeFileName(item.name, "txt"));
+        downloadReferenceAttachment(item);
         return;
       }
       if (category === "links") {
@@ -2138,12 +2356,14 @@ export default function App() {
         const content = `Name: ${item.name}\nURL: ${item.url}\nNotes: ${item.notes || "-"}\nUploaded by: ${item.uploader} (${item.uploaderEmail})`;
         const blob = new Blob([content], { type: chosen.mime || "text/plain" });
         downloadBlob(blob, safeFileName(item.name, chosen.ext));
+        downloadReferenceAttachment(item);
         return;
       }
       if (item.type === "file") {
         const buffer = base64ToUint8Array(item.content);
         const blob = new Blob([buffer], { type: item.mimeType || "application/octet-stream" });
         downloadBlob(blob, item.name);
+        downloadReferenceAttachment(item);
         return;
       }
       const entries = await gatherScriptEntries(item);
@@ -2169,6 +2389,29 @@ export default function App() {
       entries.push(entry);
     };
 
+    const pushReferenceEntries = (item, baseSegments) => {
+      if (!item?.referenceContent || !item?.referenceName) {
+        return;
+      }
+      const dirSegments = [...baseSegments, "Reference"];
+      const dirPath = `${dirSegments.join("/")}/`;
+      addEntry({
+        path: dirPath,
+        data: new Uint8Array(0),
+        crc: 0,
+        isDirectory: true,
+        date: new Date(item.createdAt),
+        externalAttr: 0x10 << 16,
+      });
+      const buffer = base64ToUint8Array(item.referenceContent);
+      addEntry({
+        path: [...dirSegments, item.referenceName].join("/"),
+        data: buffer,
+        crc: crc32(buffer),
+        date: new Date(item.createdAt),
+      });
+    };
+
     for (const { category, id } of selection) {
       if (category === "prompts") {
         const prompt = prompts.find((entry) => entry.id === id);
@@ -2183,6 +2426,7 @@ export default function App() {
           crc: crc32(content),
           date: new Date(prompt.createdAt),
         });
+        pushReferenceEntries(prompt, ["Prompts", safeFileName(prompt.name)]);
         continue;
       }
       if (category === "links") {
@@ -2198,6 +2442,7 @@ export default function App() {
           crc: crc32(content),
           date: new Date(link.createdAt),
         });
+        pushReferenceEntries(link, ["Links", safeFileName(link.name)]);
         continue;
       }
       const script = scriptsById.get(id);
@@ -2210,6 +2455,7 @@ export default function App() {
           crc: crc32(buffer),
           date: new Date(script.createdAt),
         });
+        pushReferenceEntries(script, ["Scripts", ...scriptPath(script).slice(0, -1)]);
         continue;
       }
       const baseSegments = ["Scripts", ...scriptPath(script).slice(0, -1)];
@@ -2451,6 +2697,9 @@ export default function App() {
             <p className="mt-1 text-xs text-slate-400">
               Uploaded by {item.uploader} • {formatDateTime(item.createdAt)}
             </p>
+            {category === "prompts" && item.description && (
+              <p className="mt-2 text-sm text-slate-300">{item.description}</p>
+            )}
           </div>
         </div>
         <div className="flex items-center gap-2 opacity-0 transition group-hover:opacity-100">
@@ -2521,6 +2770,33 @@ export default function App() {
     );
   };
 
+  const renderReferenceBlock = (item) => {
+    if (!item?.referenceContent || !item?.referenceName) {
+      return null;
+    }
+    return (
+      <div>
+        <p className="text-xs uppercase tracking-wide text-slate-400">Reference</p>
+        <div className="mt-1 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[#30363d] bg-[#161b22] p-3">
+          <div>
+            <p className="text-sm font-semibold text-white">{item.referenceName}</p>
+            <p className="text-xs text-slate-400">
+              {(item.referenceMime && item.referenceMime.length ? item.referenceMime : "Unknown type")}
+              {" "}• {formatFileSize(item.referenceSize)}
+            </p>
+          </div>
+          <Button
+            type="button"
+            onClick={() => downloadReferenceAttachment(item)}
+            className="bg-[#1f6feb] text-white hover:bg-[#388bfd]"
+          >
+            <Download className="mr-2 h-4 w-4" /> Reference
+          </Button>
+        </div>
+      </div>
+    );
+  };
+
   const renderPreview = (categoryFilter = null) => {
     if (!preview || (categoryFilter && preview.category !== categoryFilter)) {
       const label = categoryFilter ? categoryFilter.charAt(0).toUpperCase() + categoryFilter.slice(1) : "item";
@@ -2577,6 +2853,7 @@ export default function App() {
                   {item.notes || "No notes yet."}
                 </p>
               </div>
+              {renderReferenceBlock(item)}
             </div>
           )}
           {category === "links" && (
@@ -2598,6 +2875,7 @@ export default function App() {
                   {item.notes || "No notes yet."}
                 </p>
               </div>
+              {renderReferenceBlock(item)}
             </div>
           )}
           {category === "scripts" && (
@@ -2637,6 +2915,7 @@ export default function App() {
                   {item.notes || "No notes yet."}
                 </p>
               </div>
+              {renderReferenceBlock(item)}
             </div>
           )}
 
@@ -3125,9 +3404,6 @@ const renderScriptsTab = () => {
             <CardTitle className="flex items-center gap-2 text-white">
               <UploadCloud className="h-5 w-5 text-[#58a6ff]" /> Upload scripts
             </CardTitle>
-            <p className="text-sm text-slate-400">
-              Add single automation files or mirror entire folders. Notes stay attached for fast hand-offs.
-            </p>
           </CardHeader>
           <CardContent className="space-y-6">
             <div className="flex flex-wrap items-center gap-3 text-sm text-slate-300">
@@ -3202,6 +3478,18 @@ const renderScriptsTab = () => {
                   {scriptMode === "file" && scriptFiles.length > 0 && (
                     <p className="text-xs text-slate-400">Selected: {scriptFiles[0].name}</p>
                   )}
+                  <div>
+                    <label className="text-xs uppercase tracking-wide text-slate-400">Reference (optional)</label>
+                    <Input
+                      name="reference"
+                      type="file"
+                      accept="*/*"
+                      className="mt-1 bg-[#161b22] file:mr-3 file:rounded-lg file:border-0 file:bg-[#1f6feb] file:px-4 file:py-2 file:text-sm file:text-white"
+                    />
+                    <p className="mt-1 text-xs text-slate-500">
+                      Upload guides, walkthroughs, or demo assets that complement this script.
+                    </p>
+                  </div>
                 </div>
               </div>
             <div className="flex justify-end">
@@ -3223,7 +3511,6 @@ const renderScriptsTab = () => {
             <CardHeader className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <div>
                 <CardTitle className="text-white">Scripts</CardTitle>
-                <p className="text-sm text-slate-400">Navigate folders and manage uploaded automation assets.</p>
               </div>
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
                 {renderUploaderFilter("scripts", scriptUploaders)}
@@ -3278,13 +3565,12 @@ const renderPromptsTab = () => {
   const selectedCount = selectedCounts.prompts;
   return (
     <div className="grid gap-6 xl:grid-cols-[1fr_1fr]">
-      <Card className="border-[#30363d] bg-[#0d1117] text-white">
-        <CardHeader className="space-y-1">
-          <CardTitle className="flex items-center gap-2 text-white">
-            <FileText className="h-5 w-5 text-[#3fb950]" /> Save a prompt
-          </CardTitle>
-          <p className="text-sm text-slate-400">Capture your favourite templates with descriptions and execution notes.</p>
-        </CardHeader>
+        <Card className="border-[#30363d] bg-[#0d1117] text-white">
+          <CardHeader className="space-y-1">
+            <CardTitle className="flex items-center gap-2 text-white">
+              <FileText className="h-5 w-5 text-[#3fb950]" /> Save a prompt
+            </CardTitle>
+          </CardHeader>
         <CardContent>
           <form onSubmit={handleAddPrompt} className="space-y-4">
             <Input name="name" placeholder="Prompt title" required className="bg-[#161b22]" />
@@ -3298,6 +3584,18 @@ const renderPromptsTab = () => {
               placeholder="Full prompt or reminders"
               className="min-h-[160px] bg-[#161b22]"
             />
+            <div>
+              <label className="text-xs uppercase tracking-wide text-slate-400">Reference (optional)</label>
+              <Input
+                name="reference"
+                type="file"
+                accept="*/*"
+                className="mt-1 bg-[#161b22] file:mr-3 file:rounded-lg file:border-0 file:bg-[#1f6feb] file:px-4 file:py-2 file:text-sm file:text-white"
+              />
+              <p className="mt-1 text-xs text-slate-500">
+                Attach screenshots, documents, or other helpers teammates should review.
+              </p>
+            </div>
             <div className="flex justify-end">
               <Button
                 type="submit"
@@ -3317,7 +3615,6 @@ const renderPromptsTab = () => {
           <CardHeader className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <div>
               <CardTitle className="text-white">Prompt library</CardTitle>
-              <p className="text-sm text-slate-400">Right-click any prompt to edit, download, or remove it.</p>
             </div>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
               {renderUploaderFilter("prompts", promptUploaders)}
@@ -3369,13 +3666,12 @@ const renderLinksTab = () => {
   const selectedCount = selectedCounts.links;
   return (
     <div className="grid gap-6 xl:grid-cols-[1fr_1fr]">
-      <Card className="border-[#30363d] bg-[#0d1117] text-white">
-        <CardHeader className="space-y-1">
-          <CardTitle className="flex items-center gap-2 text-white">
-            <Link2 className="h-5 w-5 text-[#f778ba]" /> Save a link
-          </CardTitle>
-          <p className="text-sm text-slate-400">Collect references, tutorials, and documentation with helpful context.</p>
-        </CardHeader>
+        <Card className="border-[#30363d] bg-[#0d1117] text-white">
+          <CardHeader className="space-y-1">
+            <CardTitle className="flex items-center gap-2 text-white">
+              <Link2 className="h-5 w-5 text-[#f778ba]" /> Save a link
+            </CardTitle>
+          </CardHeader>
         <CardContent>
           <form onSubmit={handleAddLink} className="space-y-4">
             <Input name="name" placeholder="Resource name" required className="bg-[#161b22]" />
@@ -3385,6 +3681,18 @@ const renderLinksTab = () => {
               placeholder="Why this link matters"
               className="min-h-[140px] bg-[#161b22]"
             />
+            <div>
+              <label className="text-xs uppercase tracking-wide text-slate-400">Reference (optional)</label>
+              <Input
+                name="reference"
+                type="file"
+                accept="*/*"
+                className="mt-1 bg-[#161b22] file:mr-3 file:rounded-lg file:border-0 file:bg-[#1f6feb] file:px-4 file:py-2 file:text-sm file:text-white"
+              />
+              <p className="mt-1 text-xs text-slate-500">
+                Include demos or assets so teammates know how to use this link.
+              </p>
+            </div>
             <div className="flex justify-end">
               <Button
                 type="submit"
@@ -3404,7 +3712,6 @@ const renderLinksTab = () => {
           <CardHeader className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <div>
               <CardTitle className="text-white">Link directory</CardTitle>
-              <p className="text-sm text-slate-400">Download entries in the format you need straight from the context menu.</p>
             </div>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
               {renderUploaderFilter("links", linkUploaders)}
@@ -3562,10 +3869,10 @@ const renderBinTab = () => {
 
   const renderDashboard = () => {
     const tabDefinitions = [
-      { id: "scripts", label: "Scripts", icon: Layers, description: "Automation files and folders" },
-      { id: "prompts", label: "Prompts", icon: FileText, description: "Reusable writing templates" },
-      { id: "links", label: "Links", icon: Link2, description: "Reference URLs and notes" },
-      { id: "bin", label: "Bin", icon: Trash2, description: "Recover or remove deleted items" },
+      { id: "scripts", label: "Scripts", icon: Layers },
+      { id: "prompts", label: "Prompts", icon: FileText },
+      { id: "links", label: "Links", icon: Link2 },
+      { id: "bin", label: "Bin", icon: Trash2 },
     ];
 
   return (
@@ -3681,10 +3988,7 @@ const renderBinTab = () => {
                     >
                       <Icon className="h-5 w-5" />
                     </div>
-                    <div>
-                      <p className="text-sm font-semibold text-white">{tab.label}</p>
-                      <p className="text-xs text-slate-400">{tab.description}</p>
-                    </div>
+                    <p className="text-sm font-semibold text-white">{tab.label}</p>
                   </div>
                   <Badge className="bg-[#161b22] text-xs text-slate-200">{totals[tab.id]}</Badge>
                 </button>
@@ -3721,8 +4025,17 @@ const renderBinTab = () => {
       )}
       <div className="mx-auto max-w-6xl space-y-10 px-6 py-10">
         {activeView === "admin" ? (adminOnly ? renderAdminPanel() : (
-          <div className="rounded-2xl border border-rose-500/40 bg-rose-500/10 p-4 text-sm text-rose-100">
-            You need administrator rights to manage access. Ask an admin to promote your account.
+          <div className="space-y-3 rounded-2xl border border-rose-500/40 bg-rose-500/10 p-4 text-sm text-rose-100">
+            <p>You need administrator rights to manage access. Ask an admin to promote your account.</p>
+            <div>
+              <Button
+                variant="outline"
+                className="border-[#30363d] bg-[#161b22] text-white hover:bg-[#1b2330]"
+                onClick={() => setActiveView("dashboard")}
+              >
+                <ArrowLeft className="mr-2 h-4 w-4" /> Back to dashboard
+              </Button>
+            </div>
           </div>
         )) : (
           renderDashboard()
