@@ -559,6 +559,49 @@ const optionalColumns = {
   ]),
 };
 
+const PROMPT_FALLBACK_TOKEN = "__vaulthub_prompt";
+const PROMPT_FALLBACK_VERSION = 1;
+
+const encodePromptFallback = ({ description = "", notes = "" }) =>
+  JSON.stringify({
+    [PROMPT_FALLBACK_TOKEN]: PROMPT_FALLBACK_VERSION,
+    description,
+    notes,
+  });
+
+const decodePromptFallback = (value) => {
+  if (typeof value !== "string" || !value.trim().startsWith("{")) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(value);
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      parsed[PROMPT_FALLBACK_TOKEN] !== PROMPT_FALLBACK_VERSION
+    ) {
+      return null;
+    }
+    return {
+      description: typeof parsed.description === "string" ? parsed.description : "",
+      notes: typeof parsed.notes === "string" ? parsed.notes : "",
+    };
+  } catch (error) {
+    return null;
+  }
+};
+
+const applyPromptFallbackColumns = (tableSchema, payload, canonical) => {
+  if (!tableSchema?.columns?.description && tableSchema?.columns?.notes) {
+    const noteColumn = tableSchema.columns.notes;
+    payload[noteColumn] = encodePromptFallback({
+      description: canonical?.description ?? "",
+      notes: canonical?.notes ?? "",
+    });
+  }
+  return payload;
+};
+
 function cloneSchema(schema) {
   const result = {};
   for (const [table, config] of Object.entries(schema)) {
@@ -670,20 +713,28 @@ const getColumnName = (row, column) => {
   return row?.[column];
 };
 
-const mapPromptRow = (row, columns = defaultSupabaseSchema.prompts.columns) => ({
-  id: getColumnName(row, columns.id),
-  name: getColumnName(row, columns.name),
-  description: getColumnName(row, columns.description) ?? "",
-  notes: getColumnName(row, columns.notes) ?? "",
-  uploader: getColumnName(row, columns.uploader) ?? "Unknown",
-  uploaderEmail: getColumnName(row, columns.uploader_email) ?? "",
-  createdAt: getColumnName(row, columns.created_at) ?? new Date().toISOString(),
-  deletedAt: getColumnName(row, columns.deleted_at) ?? null,
-  referenceName: getColumnName(row, columns.reference_name) ?? "",
-  referenceMime: getColumnName(row, columns.reference_mime) ?? "",
-  referenceSize: Number(getColumnName(row, columns.reference_size) ?? 0),
-  referenceContent: getColumnName(row, columns.reference_content) ?? null,
-});
+const mapPromptRow = (row, columns = defaultSupabaseSchema.prompts.columns) => {
+  const rawNotes = getColumnName(row, columns.notes);
+  const rawDescription = getColumnName(row, columns.description);
+  const fallback = decodePromptFallback(rawNotes);
+  const resolvedDescription =
+    (typeof rawDescription === "string" ? rawDescription : "") || fallback?.description || "";
+  const resolvedNotes = fallback?.notes ?? (typeof rawNotes === "string" ? rawNotes : rawNotes ?? "");
+  return {
+    id: getColumnName(row, columns.id),
+    name: getColumnName(row, columns.name),
+    description: resolvedDescription,
+    notes: resolvedNotes,
+    uploader: getColumnName(row, columns.uploader) ?? "Unknown",
+    uploaderEmail: getColumnName(row, columns.uploader_email) ?? "",
+    createdAt: getColumnName(row, columns.created_at) ?? new Date().toISOString(),
+    deletedAt: getColumnName(row, columns.deleted_at) ?? null,
+    referenceName: getColumnName(row, columns.reference_name) ?? "",
+    referenceMime: getColumnName(row, columns.reference_mime) ?? "",
+    referenceSize: Number(getColumnName(row, columns.reference_size) ?? 0),
+    referenceContent: getColumnName(row, columns.reference_content) ?? null,
+  };
+};
 
 const mapLinkRow = (row, columns = defaultSupabaseSchema.links.columns) => ({
   id: getColumnName(row, columns.id),
@@ -1640,7 +1691,11 @@ export default function App() {
         reference_content: referenceData?.content ?? null,
       };
       const entry = await executeSupabase("prompts", async (schema) => {
-        const shapedPayload = shapeSupabasePayload(schema.prompts, payload);
+        const shapedPayload = applyPromptFallbackColumns(
+          schema.prompts,
+          shapeSupabasePayload(schema.prompts, payload),
+          payload
+        );
         updateUploadProgress("prompts", progressId, {
           label: "Uploading to Supabase…",
           value: 45,
@@ -2575,11 +2630,12 @@ export default function App() {
       if (editingItem.category === "prompts") {
         const description = String(form.get("description") || "").trim();
         await executeSupabase("prompts", async (schema) => {
-          const updatePayload = shapeSupabasePayload(schema.prompts, {
-            name,
-            description,
-            notes,
-          });
+          const canonical = { name, description, notes };
+          const updatePayload = applyPromptFallbackColumns(
+            schema.prompts,
+            shapeSupabasePayload(schema.prompts, canonical),
+            canonical
+          );
           await supabaseRequest(buildFilterPath(schema.prompts, "id", editingItem.item.id), {
             method: "PATCH",
             headers: { Prefer: "return=representation" },
@@ -3612,7 +3668,7 @@ const renderPromptsTab = () => {
             <Input name="name" placeholder="Prompt title" required className="bg-[#161b22]" />
             <Textarea
               name="description"
-              placeholder="Short summary"
+              placeholder="Description"
               className="min-h-[100px] bg-[#161b22]"
             />
             <Textarea
