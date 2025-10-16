@@ -1137,21 +1137,30 @@ export default function App() {
   const executeSupabase = useCallback(
     async (tableKey, action) => {
       let schema = supabaseSchema;
-      let lastError = null;
-      for (let attempt = 0; attempt < 5; attempt++) {
+      const resolvedColumns = new Set();
+      // Keep retrying while we can progressively disable optional columns that Supabase rejects.
+      // This accounts for projects that are missing many optional fields without failing after a
+      // fixed number of attempts.
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
         try {
           return await action(schema);
         } catch (error) {
-          lastError = error;
           const info = parseMissingColumnError(error);
           const resolved = resolveMissingColumn(schema, tableKey, info);
           if (!resolved) {
             throw error;
           }
+          const key = `${resolved.tableKey}:${resolved.logicalKey}`;
+          if (resolvedColumns.has(key)) {
+            // We've already attempted to disable this column, so bubble the error up instead of
+            // looping forever.
+            throw error;
+          }
+          resolvedColumns.add(key);
           schema = resolved.schema;
           setSupabaseSchema(resolved.schema);
           setMissingSchemaColumns((prev) => {
-            const key = `${resolved.tableKey}:${resolved.logicalKey}`;
             if (prev.some((entry) => entry.key === key)) {
               return prev;
             }
@@ -1169,10 +1178,8 @@ export default function App() {
               },
             ];
           });
-          continue;
         }
       }
-      throw lastError;
     },
     [supabaseSchema, setSupabaseSchema, setMissingSchemaColumns]
   );
