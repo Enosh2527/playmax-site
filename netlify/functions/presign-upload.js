@@ -66,7 +66,7 @@ exports.handler = async (event) => {
       throw new Error("R2 bucket is not configured.");
     }
 
-    const { action, key, contentType } = JSON.parse(event.body || "{}");
+    const { action, key, contentType, data, encoding } = JSON.parse(event.body || "{}");
     if (!action || !key) {
       return {
         statusCode: 400,
@@ -76,6 +76,30 @@ exports.handler = async (event) => {
     }
 
     let command;
+    if (action === "proxy-upload") {
+      if (!data) {
+        return {
+          statusCode: 400,
+          headers: allowCors,
+          body: JSON.stringify({ error: "Missing file data" }),
+        };
+      }
+      const buffer = Buffer.from(data, encoding === "base64" || !encoding ? "base64" : encoding);
+      await s3.send(
+        new PutObjectCommand({
+          Bucket: bucket,
+          Key: key,
+          Body: buffer,
+          ContentType: contentType || "application/octet-stream",
+        })
+      );
+      return {
+        statusCode: 200,
+        headers: allowCors,
+        body: JSON.stringify({ key }),
+      };
+    }
+
     if (action === "upload") {
       command = new PutObjectCommand({
         Bucket: bucket,

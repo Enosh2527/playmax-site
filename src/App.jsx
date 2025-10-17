@@ -170,20 +170,86 @@ async function requestPresignedUrl(action, key, contentType) {
   return data.url;
 }
 
+function uint8ArrayToBase64(bytes) {
+  if (!bytes || !bytes.length) {
+    return "";
+  }
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(bytes).toString("base64");
+  }
+  if (typeof window !== "undefined" && typeof window.btoa === "function") {
+    let binary = "";
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+      binary += String.fromCharCode(...chunk);
+    }
+    return window.btoa(binary);
+  }
+  throw new Error("Base64 encoding is not supported in this environment.");
+}
+
+async function proxyUploadFileToR2({ key, file, contentType }) {
+  if (!file) {
+    throw new Error("No file provided for R2 upload.");
+  }
+  if (typeof file.arrayBuffer !== "function") {
+    throw new Error("File does not support arrayBuffer().");
+  }
+  const buffer = await file.arrayBuffer();
+  const base64 = uint8ArrayToBase64(new Uint8Array(buffer));
+  const response = await fetch("/api/presign-upload", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      action: "proxy-upload",
+      key,
+      contentType,
+      data: base64,
+      encoding: "base64",
+    }),
+  });
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || "Failed to upload file to R2 via proxy.");
+  }
+  const payload = await response.json().catch(() => ({}));
+  if (payload?.error) {
+    throw new Error(payload.error);
+  }
+  return key;
+}
+
 async function uploadFileToR2({ key, file, contentType }) {
   if (!file) {
     throw new Error("No file provided for R2 upload.");
   }
-  const url = await requestPresignedUrl("upload", key, contentType || file.type || undefined);
-  const uploadResponse = await fetch(url, {
-    method: "PUT",
-    headers: contentType || file.type ? { "Content-Type": contentType || file.type } : {},
-    body: file,
-  });
-  if (!uploadResponse.ok) {
-    throw new Error(`Failed to upload file to R2 (status ${uploadResponse.status}).`);
+  const resolvedContentType = contentType || file.type || "application/octet-stream";
+  try {
+    const url = await requestPresignedUrl("upload", key, resolvedContentType);
+    const uploadResponse = await fetch(url, {
+      method: "PUT",
+      headers: resolvedContentType ? { "Content-Type": resolvedContentType } : {},
+      body: file,
+    });
+    if (!uploadResponse.ok) {
+      throw new Error(`Failed to upload file to R2 (status ${uploadResponse.status}).`);
+    }
+    return key;
+  } catch (error) {
+    const message = typeof error?.message === "string" ? error.message : "";
+    const shouldFallback =
+      error?.name === "TypeError" || /failed to fetch/i.test(message) || /status\s(4|5)\d{2}/i.test(message);
+    if (!shouldFallback) {
+      throw error;
+    }
+    try {
+      return await proxyUploadFileToR2({ key, file, contentType: resolvedContentType });
+    } catch (proxyError) {
+      proxyError.cause = error;
+      throw proxyError;
+    }
   }
-  return key;
 }
 
 async function downloadPointerToUint8Array(key) {
