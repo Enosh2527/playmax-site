@@ -24,6 +24,20 @@ VITE_SUPABASE_KEY=your-public-anon-key
 
 See [Supabase storage setup](#supabase-storage-setup-free-tier) for table definitions and a full walkthrough.
 
+### Cloudflare R2 credentials
+
+Uploads are written directly to Cloudflare R2 through a Netlify function that issues presigned URLs. Add the following secrets to your hosting provider (or a local `.env` file consumed by Netlify functions):
+
+```
+R2_ACCESS_KEY_ID=your-r2-access-key
+R2_SECRET_ACCESS_KEY=your-r2-secret
+R2_ACCOUNT_ID=your-r2-account-id
+R2_BUCKET=vault-files
+R2_REGION=auto
+```
+
+These values power `netlify/functions/presign-upload.js`, which hands the browser a short-lived PUT/GET URL for each file.
+
 ## Default access
 
 Two administrator accounts are seeded so you can explore the workspace immediately:
@@ -49,7 +63,7 @@ The app will be available on http://localhost:5173 with the draft ribbon display
 
 ## Supabase storage setup (free tier)
 
-VaultHub now uses [Supabase](https://supabase.com) as its zero-cost cloud vault. Every prompt, link, and script upload is written to your project's Postgres database through the REST API. To get started:
+VaultHub now uses [Supabase](https://supabase.com) for metadata and [Cloudflare R2](https://www.cloudflare.com/products/r2/) for binary storage. Every prompt, link, and script upload records its metadata in Supabase while the files themselves are streamed straight to R2 through presigned URLs. To get started:
 
 1. Create a Supabase project (the free tier includes 500 MB of database storage which is plenty for prompt text and small script bundles).
 2. In the Supabase dashboard, create the vault tables using the SQL editor:
@@ -115,7 +129,7 @@ VaultHub now uses [Supabase](https://supabase.com) as its zero-cost cloud vault.
    );
    ```
 
-   The app stores script files and folders in this table. Files are base64 encoded (along with optional reference attachments) and remain lightweight enough for Supabase's free limits. The `reference_*` columns let you attach screenshots, docs, or other helpers to any prompt, link, or script entry. The `allowed_emails` table keeps your access list in sync across devices so anyone you approve from the Admin Control Room can register and start uploading straight away.
+   Supabase tracks ownership, notes, and the R2 object pointers for every upload. The `file_content` and `reference_content` columns now store values like `r2://scripts/<uuid>/<filename>` which the app uses to request presigned download URLs. The `reference_*` columns still describe companion files (screenshots, docs, walkthroughs, etc.), and the `allowed_emails` table keeps your access list in sync across devices so anyone you approve from the Admin Control Room can register and start uploading straight away.
 3. Open **Project Settings → API** and copy the **Project URL** and **anon public key**.
 4. Create a `.env.local` file with those values so the front-end can talk to your project. You can paste the API URL, the dashboard URL, or just the project ref — the app normalises each format automatically:
 

@@ -169,27 +169,66 @@ async function supabaseRequest(path, { method = "GET", headers = {}, body, signa
   return rawText;
 }
 
-const textEncoder = new TextEncoder();
+const STORAGE_POINTER_PREFIX = "r2://";
 
-function arrayBufferToBase64(buffer) {
-  if (typeof window === "undefined" && typeof Buffer !== "undefined") {
-    return Buffer.from(buffer).toString("base64");
+const encodeStoragePointer = (key) =>
+  typeof key === "string" && key.length > 0 ? `${STORAGE_POINTER_PREFIX}${key}` : null;
+
+const decodeStoragePointer = (value) =>
+  typeof value === "string" && value.startsWith(STORAGE_POINTER_PREFIX)
+    ? value.slice(STORAGE_POINTER_PREFIX.length)
+    : null;
+
+async function requestPresignedUrl(action, key, contentType) {
+  if (!action || !key) {
+    throw new Error("Missing action or key for R2 request.");
   }
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    const chunk = bytes.subarray(i, i + chunkSize);
-    binary += String.fromCharCode(...chunk);
+  const response = await fetch("/api/presign-upload", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action, key, contentType }),
+  });
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || `Failed to request presigned ${action} URL.`);
   }
-  if (typeof window !== "undefined" && typeof window.btoa === "function") {
-    return window.btoa(binary);
+  const data = await response.json();
+  if (!data?.url) {
+    throw new Error("Presigned URL response missing url property.");
   }
-  if (typeof globalThis !== "undefined" && typeof globalThis.btoa === "function") {
-    return globalThis.btoa(binary);
-  }
-  throw new Error("Base64 encoding is not supported in this environment.");
+  return data.url;
 }
+
+async function uploadFileToR2({ key, file, contentType }) {
+  if (!file) {
+    throw new Error("No file provided for R2 upload.");
+  }
+  const url = await requestPresignedUrl("upload", key, contentType || file.type || undefined);
+  const uploadResponse = await fetch(url, {
+    method: "PUT",
+    headers: contentType || file.type ? { "Content-Type": contentType || file.type } : {},
+    body: file,
+  });
+  if (!uploadResponse.ok) {
+    throw new Error(`Failed to upload file to R2 (status ${uploadResponse.status}).`);
+  }
+  return key;
+}
+
+async function downloadPointerToUint8Array(key) {
+  if (!key) {
+    throw new Error("Missing R2 key for download.");
+  }
+  const url = await requestPresignedUrl("download", key);
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to download R2 object (status ${response.status}).`);
+  }
+  const buffer = await response.arrayBuffer();
+  return new Uint8Array(buffer);
+}
+
+const textEncoder = new TextEncoder();
 
 function base64ToUint8Array(base64) {
   if (!base64) {
@@ -212,19 +251,52 @@ function base64ToUint8Array(base64) {
   return bytes;
 }
 
-async function prepareReferenceFile(file) {
+const parseStorageValue = (value) => {
+  const key = decodeStoragePointer(value);
+  if (key) {
+    return { key, legacyContent: null };
+  }
+  return {
+    key: null,
+    legacyContent: typeof value === "string" && value.length ? value : null,
+  };
+};
+
+async function loadStorageBinary(value) {
+  const { key, legacyContent } = parseStorageValue(value);
+  if (key) {
+    return downloadPointerToUint8Array(key);
+  }
+  if (legacyContent) {
+    return base64ToUint8Array(legacyContent);
+  }
+  return new Uint8Array(0);
+}
+
+async function prepareReferenceFile(file, { category, ownerId }) {
   if (!file || typeof file !== "object" || typeof file.arrayBuffer !== "function") {
     return null;
   }
   if (!file.size) {
     return null;
   }
-  const buffer = await file.arrayBuffer();
+  if (!category || !ownerId) {
+    throw new Error("Missing category or owner when preparing reference file.");
+  }
+  const key = `${category}/${ownerId}/reference/${Date.now()}-${safeFileName(
+    file.name || "reference"
+  )}`;
+  await uploadFileToR2({
+    key,
+    file,
+    contentType: file.type || "application/octet-stream",
+  });
   return {
     name: file.name || "reference",
     mime: file.type || "application/octet-stream",
     size: Number(file.size || 0),
-    content: arrayBufferToBase64(buffer),
+    content: encodeStoragePointer(key),
+    key,
   };
 }
 
@@ -580,15 +652,18 @@ const normaliseReferenceData = (input = {}) => {
       : input.reference_size !== undefined
       ? input.reference_size
       : null;
-  const content = input.content ?? input.reference_content ?? null;
-  if (!name && !mime && !size && !content) {
+  const rawContent = input.content ?? input.reference_content ?? null;
+  const { key, legacyContent } = parseStorageValue(rawContent);
+  if (!name && !mime && !size && !key && !legacyContent) {
     return null;
   }
   return {
     name,
     mime,
     size,
-    content,
+    content: rawContent,
+    key,
+    legacyContent,
   };
 };
 
@@ -978,6 +1053,10 @@ const mapPromptRow = (row, columns = defaultSupabaseSchema.prompts.columns) => {
     return value;
   })();
   const resolvedReference = fallback?.reference ?? null;
+  const rawReferenceContent =
+    getColumnName(row, columns.reference_content) ?? resolvedReference?.content ?? null;
+  const { key: referenceKey, legacyContent: referenceLegacyContent } =
+    parseStorageValue(rawReferenceContent);
   const deletedAt = getColumnName(row, columns.deleted_at) ?? fallback?.deleted_at ?? null;
   return {
     id: getColumnName(row, columns.id),
@@ -993,8 +1072,9 @@ const mapPromptRow = (row, columns = defaultSupabaseSchema.prompts.columns) => {
     referenceSize: Number(
       getColumnName(row, columns.reference_size) ?? resolvedReference?.size ?? 0
     ),
-    referenceContent:
-      getColumnName(row, columns.reference_content) ?? resolvedReference?.content ?? null,
+    referenceContent: rawReferenceContent,
+    referenceKey,
+    referenceLegacyContent,
     fallbackData: fallback,
   };
 };
@@ -1013,6 +1093,10 @@ const mapLinkRow = (row, columns = defaultSupabaseSchema.links.columns) => {
     return value;
   })();
   const resolvedReference = fallback?.reference ?? null;
+  const rawReferenceContent =
+    getColumnName(row, columns.reference_content) ?? resolvedReference?.content ?? null;
+  const { key: referenceKey, legacyContent: referenceLegacyContent } =
+    parseStorageValue(rawReferenceContent);
   const deletedAt = getColumnName(row, columns.deleted_at) ?? fallback?.deleted_at ?? null;
   return {
     id: getColumnName(row, columns.id),
@@ -1028,8 +1112,9 @@ const mapLinkRow = (row, columns = defaultSupabaseSchema.links.columns) => {
     referenceSize: Number(
       getColumnName(row, columns.reference_size) ?? resolvedReference?.size ?? 0
     ),
-    referenceContent:
-      getColumnName(row, columns.reference_content) ?? resolvedReference?.content ?? null,
+    referenceContent: rawReferenceContent,
+    referenceKey,
+    referenceLegacyContent,
     fallbackData: fallback,
   };
 };
@@ -1048,6 +1133,12 @@ const mapScriptRow = (row, columns = defaultSupabaseSchema.scripts.columns) => {
     return value;
   })();
   const resolvedReference = fallback?.reference ?? null;
+  const rawReferenceContent =
+    getColumnName(row, columns.reference_content) ?? resolvedReference?.content ?? null;
+  const { key: referenceKey, legacyContent: referenceLegacyContent } =
+    parseStorageValue(rawReferenceContent);
+  const rawContent = getColumnName(row, columns.file_content) ?? null;
+  const { key: contentKey, legacyContent } = parseStorageValue(rawContent);
   const deletedAt = getColumnName(row, columns.deleted_at) ?? fallback?.deleted_at ?? null;
   return {
     id: getColumnName(row, columns.id),
@@ -1063,15 +1154,18 @@ const mapScriptRow = (row, columns = defaultSupabaseSchema.scripts.columns) => {
       (getColumnName(row, columns.type) === "folder" ? "" : "application/octet-stream"),
     size: Number(getColumnName(row, columns.file_size) ?? 0),
     originalName: getColumnName(row, columns.original_name) ?? getColumnName(row, columns.name),
-    content: getColumnName(row, columns.file_content) ?? null,
+    content: rawContent,
+    contentKey,
+    legacyContent,
     deletedAt,
     referenceName: getColumnName(row, columns.reference_name) ?? resolvedReference?.name ?? "",
     referenceMime: getColumnName(row, columns.reference_mime) ?? resolvedReference?.mime ?? "",
     referenceSize: Number(
       getColumnName(row, columns.reference_size) ?? resolvedReference?.size ?? 0
     ),
-    referenceContent:
-      getColumnName(row, columns.reference_content) ?? resolvedReference?.content ?? null,
+    referenceContent: rawReferenceContent,
+    referenceKey,
+    referenceLegacyContent,
     fallbackData: fallback,
   };
 };
@@ -1970,9 +2064,12 @@ export default function App() {
     const referenceFile = form.get("reference");
     const hasReference =
       referenceFile && typeof referenceFile === "object" && "size" in referenceFile && referenceFile.size;
-    const referenceData = hasReference ? await prepareReferenceFile(referenceFile) : null;
     if (!name) return;
     const createdAt = new Date().toISOString();
+    const id = crypto.randomUUID();
+    const referenceData = hasReference
+      ? await prepareReferenceFile(referenceFile, { category: "prompts", ownerId: id })
+      : null;
     let progressId = null;
     try {
       setIsProcessing(true);
@@ -1980,7 +2077,7 @@ export default function App() {
       progressId = beginUploadProgress("prompts", "Saving prompt…");
       updateUploadProgress("prompts", progressId, { value: 15 });
       const payload = {
-        id: crypto.randomUUID(),
+        id,
         name,
         description,
         notes,
@@ -2042,9 +2139,12 @@ export default function App() {
     const referenceFile = form.get("reference");
     const hasReference =
       referenceFile && typeof referenceFile === "object" && "size" in referenceFile && referenceFile.size;
-    const referenceData = hasReference ? await prepareReferenceFile(referenceFile) : null;
     if (!name || !url) return;
     const createdAt = new Date().toISOString();
+    const id = crypto.randomUUID();
+    const referenceData = hasReference
+      ? await prepareReferenceFile(referenceFile, { category: "links", ownerId: id })
+      : null;
     let progressId = null;
     try {
       setIsProcessing(true);
@@ -2052,7 +2152,7 @@ export default function App() {
       progressId = beginUploadProgress("links", "Saving link…");
       updateUploadProgress("links", progressId, { value: 15 });
       const payload = {
-        id: crypto.randomUUID(),
+        id,
         name,
         url,
         notes,
@@ -2111,9 +2211,9 @@ export default function App() {
     parentLogicalId,
     onProgress,
     reference,
+    rootId = crypto.randomUUID(),
   }) => {
     const rows = [];
-    const rootId = crypto.randomUUID();
     const defaultRootName = files[0]?.webkitRelativePath?.split("/")[0] || "Folder";
     const totalBytes = files.reduce((sum, file) => sum + Number(file.size || 0), 0);
     let processedBytes = 0;
@@ -2185,15 +2285,20 @@ export default function App() {
       }
       const parentPathKey = parts.join("/");
       const folderId = parentPathKey ? pathToFolderId.get(parentPathKey) : rootId;
-      const buffer = await file.arrayBuffer();
+      const fileId = crypto.randomUUID();
+      const storageKey = await uploadFileToR2({
+        key: `scripts/${fileId}/${Date.now()}-${safeFileName(file.name)}`,
+        file,
+        contentType: file.type || "application/octet-stream",
+      });
       rows.push({
-        id: crypto.randomUUID(),
+        id: fileId,
         type: "file",
         name: fileName,
         original_name: file.name,
         file_mime: file.type || "application/octet-stream",
         file_size: Number(file.size || 0),
-        file_content: arrayBufferToBase64(buffer),
+        file_content: encodeStoragePointer(storageKey),
         notes,
         uploader: currentUser.name,
         uploader_email: currentUser.email,
@@ -2222,7 +2327,6 @@ export default function App() {
     const referenceFile = form.get("reference");
     const hasReference =
       referenceFile && typeof referenceFile === "object" && "size" in referenceFile && referenceFile.size;
-    const referenceData = hasReference ? await prepareReferenceFile(referenceFile) : null;
     const createdAt = new Date().toISOString();
     const parentLogicalId = currentScriptFolderId ?? null;
     let progressId = null;
@@ -2234,15 +2338,26 @@ export default function App() {
       if (scriptMode === "file") {
         if (!scriptFiles.length) return;
         const file = scriptFiles[0];
+        const scriptId = crypto.randomUUID();
+        const referenceData = hasReference
+          ? await prepareReferenceFile(referenceFile, {
+              category: "scripts",
+              ownerId: scriptId,
+            })
+          : null;
         progressId = beginUploadProgress("scripts", "Preparing script file…");
         updateUploadProgress("scripts", progressId, { value: 12 });
-        const buffer = await file.arrayBuffer();
         updateUploadProgress("scripts", progressId, {
-          label: "Encoding file…",
-          value: 32,
+          label: "Requesting storage…",
+          value: 28,
+        });
+        const storageKey = await uploadFileToR2({
+          key: `scripts/${scriptId}/${Date.now()}-${safeFileName(file.name)}`,
+          file,
+          contentType: file.type || "application/octet-stream",
         });
         const payload = {
-          id: crypto.randomUUID(),
+          id: scriptId,
           type: "file",
           name: name || file.name,
           original_name: file.name,
@@ -2253,24 +2368,24 @@ export default function App() {
           uploader_email: currentUser.email,
           created_at: createdAt,
           parent_id: parentLogicalId,
-          file_content: arrayBufferToBase64(buffer),
+          file_content: encodeStoragePointer(storageKey),
           deleted_at: null,
           reference_name: referenceData?.name ?? null,
           reference_mime: referenceData?.mime ?? null,
-        reference_size: referenceData?.size ?? null,
-        reference_content: referenceData?.content ?? null,
-      };
-      const entry = await executeSupabase("scripts", async (schema) => {
-        const shapedPayload = applyScriptFallbackColumns(
-          schema.scripts,
-          shapeSupabasePayload(schema.scripts, payload),
-          payload
-        );
-        updateUploadProgress("scripts", progressId, {
-          label: "Uploading to Supabase…",
-          value: 55,
-        });
-        const data = await supabaseRequest(schema.scripts.table, {
+          reference_size: referenceData?.size ?? null,
+          reference_content: referenceData?.content ?? null,
+        };
+        const entry = await executeSupabase("scripts", async (schema) => {
+          const shapedPayload = applyScriptFallbackColumns(
+            schema.scripts,
+            shapeSupabasePayload(schema.scripts, payload),
+            payload
+          );
+          updateUploadProgress("scripts", progressId, {
+            label: "Saving metadata…",
+            value: 55,
+          });
+          const data = await supabaseRequest(schema.scripts.table, {
             method: "POST",
             headers: { Prefer: "return=representation" },
             body: JSON.stringify([shapedPayload]),
@@ -2291,6 +2406,13 @@ export default function App() {
       }
 
       if (!scriptFolderFiles.length) return;
+      const rootId = crypto.randomUUID();
+      const referenceData = hasReference
+        ? await prepareReferenceFile(referenceFile, {
+            category: "scripts",
+            ownerId: rootId,
+          })
+        : null;
       progressId = beginUploadProgress("scripts", "Preparing folder upload…");
       updateUploadProgress("scripts", progressId, { value: 12 });
       const rows = await gatherFolderRows({
@@ -2300,13 +2422,14 @@ export default function App() {
         createdAt,
         parentLogicalId,
         reference: referenceData,
+        rootId,
         onProgress: ({ processedBytes, totalBytes, fileName }) => {
           if (!progressId) return;
           const portion = totalBytes ? processedBytes / totalBytes : 1;
           const value = 12 + portion * 50;
           updateUploadProgress("scripts", progressId, {
             value,
-            label: fileName ? `Encoding ${fileName}` : "Preparing folder…",
+            label: fileName ? `Uploading ${fileName}` : "Preparing folder…",
           });
         },
       });
@@ -2823,7 +2946,7 @@ export default function App() {
             });
             seenDirectories.add(referenceDirPath);
           }
-          const refBuffer = base64ToUint8Array(item.referenceContent);
+          const refBuffer = await loadStorageBinary(item.referenceContent);
           entries.push({
             path: [...pathSegments, "Reference", item.referenceName].join("/"),
             data: refBuffer,
@@ -2838,7 +2961,7 @@ export default function App() {
         }
         return entries;
       }
-      const buffer = base64ToUint8Array(item.content);
+      const buffer = await loadStorageBinary(item.content);
       entries.push({
         path: pathSegments.join("/"),
         data: buffer,
@@ -2859,7 +2982,7 @@ export default function App() {
           });
           seenDirectories.add(referenceDirPath);
         }
-        const refBuffer = base64ToUint8Array(item.referenceContent);
+        const refBuffer = await loadStorageBinary(item.referenceContent);
         entries.push({
           path: [...parentSegments, "Reference", item.referenceName].join("/"),
           data: refBuffer,
@@ -2880,12 +3003,15 @@ export default function App() {
     { ext: "py", label: "Python (.py)", mime: "text/x-python" },
   ];
 
-  const downloadReferenceAttachment = (item) => {
+  const downloadReferenceAttachment = async (item) => {
     if (!item?.referenceContent || !item?.referenceName) {
       return false;
     }
     try {
-      const buffer = base64ToUint8Array(item.referenceContent);
+      const buffer = await loadStorageBinary(item.referenceContent);
+      if (!buffer?.length) {
+        throw new Error("Reference attachment is empty.");
+      }
       const blob = new Blob([buffer], {
         type: item.referenceMime || "application/octet-stream",
       });
@@ -2908,7 +3034,7 @@ export default function App() {
       if (category === "prompts") {
         const content = `Name: ${item.name}\nDescription: ${item.description || "-"}\nNotes: ${item.notes || "-"}\nUploaded by: ${item.uploader} (${item.uploaderEmail})`;
         downloadBlob(new Blob([content], { type: "text/plain" }), safeFileName(item.name, "txt"));
-        downloadReferenceAttachment(item);
+        await downloadReferenceAttachment(item);
         return;
       }
       if (category === "links") {
@@ -2916,14 +3042,14 @@ export default function App() {
         const content = `Name: ${item.name}\nURL: ${item.url}\nNotes: ${item.notes || "-"}\nUploaded by: ${item.uploader} (${item.uploaderEmail})`;
         const blob = new Blob([content], { type: chosen.mime || "text/plain" });
         downloadBlob(blob, safeFileName(item.name, chosen.ext));
-        downloadReferenceAttachment(item);
+        await downloadReferenceAttachment(item);
         return;
       }
       if (item.type === "file") {
-        const buffer = base64ToUint8Array(item.content);
+        const buffer = await loadStorageBinary(item.content);
         const blob = new Blob([buffer], { type: item.mimeType || "application/octet-stream" });
         downloadBlob(blob, item.name);
-        downloadReferenceAttachment(item);
+        await downloadReferenceAttachment(item);
         return;
       }
       const entries = await gatherScriptEntries(item);
@@ -2949,7 +3075,7 @@ export default function App() {
       entries.push(entry);
     };
 
-    const pushReferenceEntries = (item, baseSegments) => {
+    const pushReferenceEntries = async (item, baseSegments) => {
       if (!item?.referenceContent || !item?.referenceName) {
         return;
       }
@@ -2963,7 +3089,7 @@ export default function App() {
         date: new Date(item.createdAt),
         externalAttr: 0x10 << 16,
       });
-      const buffer = base64ToUint8Array(item.referenceContent);
+      const buffer = await loadStorageBinary(item.referenceContent);
       addEntry({
         path: [...dirSegments, item.referenceName].join("/"),
         data: buffer,
@@ -2986,7 +3112,7 @@ export default function App() {
           crc: crc32(content),
           date: new Date(prompt.createdAt),
         });
-        pushReferenceEntries(prompt, ["Prompts", safeFileName(prompt.name)]);
+        await pushReferenceEntries(prompt, ["Prompts", safeFileName(prompt.name)]);
         continue;
       }
       if (category === "links") {
@@ -3002,20 +3128,20 @@ export default function App() {
           crc: crc32(content),
           date: new Date(link.createdAt),
         });
-        pushReferenceEntries(link, ["Links", safeFileName(link.name)]);
+        await pushReferenceEntries(link, ["Links", safeFileName(link.name)]);
         continue;
       }
       const script = scriptsById.get(id);
       if (!script) continue;
       if (script.type === "file") {
-        const buffer = base64ToUint8Array(script.content);
+        const buffer = await loadStorageBinary(script.content);
         addEntry({
           path: ["Scripts", ...scriptPath(script)].join("/"),
           data: buffer,
           crc: crc32(buffer),
           date: new Date(script.createdAt),
         });
-        pushReferenceEntries(script, ["Scripts", ...scriptPath(script).slice(0, -1)]);
+        await pushReferenceEntries(script, ["Scripts", ...scriptPath(script).slice(0, -1)]);
         continue;
       }
       const baseSegments = ["Scripts", ...scriptPath(script).slice(0, -1)];
@@ -3378,7 +3504,9 @@ export default function App() {
           </div>
           <Button
             type="button"
-            onClick={() => downloadReferenceAttachment(item)}
+                  onClick={async () => {
+                    await downloadReferenceAttachment(item);
+                  }}
             className="bg-[#1f6feb] text-white hover:bg-[#388bfd]"
           >
             <Download className="mr-2 h-4 w-4" /> Reference
