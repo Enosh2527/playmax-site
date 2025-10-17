@@ -1254,6 +1254,8 @@ export default function App() {
     user: null,
   });
   const [advancedSearchOpen, setAdvancedSearchOpen] = useState(false);
+  const [searchFeedback, setSearchFeedback] = useState("");
+  const searchHandledRef = useRef("");
 
   const userScopeEmail = searchConfig.mode === "user" ? searchConfig.user : null;
   const searchQuery = searchConfig.query;
@@ -1324,6 +1326,8 @@ export default function App() {
     setSearchConfig({ mode: "none", query: "", display: "", tab: null, user: null });
     setSearchScope({ type: "global", target: null });
     setAdvancedSearchOpen(false);
+    setSearchFeedback("");
+    searchHandledRef.current = "";
   }, []);
 
   const [activeTab, setActiveTab] = useState("scripts");
@@ -2111,6 +2115,122 @@ export default function App() {
     isSearchActiveForCategory,
     searchQuery,
     scriptPathLabels,
+  ]);
+
+  useEffect(() => {
+    if (!isSearchActive) {
+      if (searchFeedback) {
+        setSearchFeedback("");
+      }
+      searchHandledRef.current = "";
+      return;
+    }
+
+    const queryDisplay = searchConfig.display || searchConfig.query || "";
+    const signature = [
+      searchConfig.mode,
+      searchConfig.tab || "",
+      searchConfig.user || "",
+      queryDisplay,
+      scriptsInView.length,
+      filteredPrompts.length,
+      filteredLinks.length,
+      trashedScriptSummaries.length,
+      visibleTrashedPrompts.length,
+      visibleTrashedLinks.length,
+    ].join("|");
+
+    if (searchHandledRef.current.startsWith(signature)) {
+      return;
+    }
+
+    const counts = {
+      scripts: scriptsInView.length,
+      prompts: filteredPrompts.length,
+      links: filteredLinks.length,
+      bin:
+        trashedScriptSummaries.length +
+        visibleTrashedPrompts.length +
+        visibleTrashedLinks.length,
+    };
+
+    const firstItemFor = (category) => {
+      if (category === "scripts") return scriptsInView[0] || null;
+      if (category === "prompts") return filteredPrompts[0] || null;
+      if (category === "links") return filteredLinks[0] || null;
+      return null;
+    };
+
+    const noResultsMessage = () => {
+      if (searchConfig.mode === "user" && searchConfig.user) {
+        return `No uploads found for ${searchConfig.user}.`;
+      }
+      if (queryDisplay) {
+        return `No files found for “${queryDisplay}”.`;
+      }
+      return "No uploads match the selected filters.";
+    };
+
+    let targetCategory = null;
+    if (searchConfig.mode === "tab") {
+      targetCategory = searchConfig.tab || "scripts";
+      if (!counts[targetCategory]) {
+        const label = TAB_LABELS[targetCategory] || targetCategory;
+        const message = queryDisplay
+          ? `No files found for “${queryDisplay}” in ${label}.`
+          : searchConfig.mode === "user" && searchConfig.user
+          ? `No uploads found for ${searchConfig.user}.`
+          : "No uploads match the selected filters.";
+        if (searchFeedback !== message) {
+          setSearchFeedback(message);
+        }
+        searchHandledRef.current = `${signature}:none`;
+        return;
+      }
+    } else {
+      const order = ["scripts", "prompts", "links", "bin"];
+      targetCategory = order.find((category) => counts[category]) || null;
+      if (!targetCategory) {
+        const message = noResultsMessage();
+        if (searchFeedback !== message) {
+          setSearchFeedback(message);
+        }
+        searchHandledRef.current = `${signature}:none`;
+        return;
+      }
+    }
+
+    if (searchFeedback) {
+      setSearchFeedback("");
+    }
+
+    if (targetCategory !== "bin" && counts[targetCategory]) {
+      const firstItem = firstItemFor(targetCategory);
+      if (
+        firstItem &&
+        (!preview || preview.category !== targetCategory || preview.item?.id !== firstItem.id)
+      ) {
+        setPreview({ category: targetCategory, item: firstItem });
+      }
+    }
+
+    if (activeTab !== targetCategory) {
+      setActiveTab(targetCategory);
+    }
+
+    searchHandledRef.current = `${signature}:${targetCategory}`;
+  }, [
+    isSearchActive,
+    searchConfig,
+    searchFeedback,
+    scriptsInView,
+    filteredPrompts,
+    filteredLinks,
+    trashedScriptSummaries,
+    visibleTrashedPrompts,
+    visibleTrashedLinks,
+    preview,
+    activeTab,
   ]);
 
   const totals = useMemo(
@@ -4305,6 +4425,40 @@ export default function App() {
 
 const renderScriptsTab = () => {
   const selectedCount = selectedCounts.scripts;
+  const scriptSearchActive =
+    isSearchActiveForCategory("scripts") && (searchQuery || searchConfig.mode === "user");
+  const scriptEmptyCopy = (() => {
+    if (scriptSearchActive) {
+      if (searchConfig.mode === "user" && searchConfig.user) {
+        return {
+          title: `No scripts uploaded by ${searchConfig.user}.`,
+          description:
+            "Try another teammate or clear the user filter to browse every script.",
+        };
+      }
+      if (searchConfig.display) {
+        return {
+          title: `No scripts match “${searchConfig.display}”.`,
+          description: "Try another keyword or clear the filters to see more scripts.",
+        };
+      }
+      return {
+        title: "No scripts match the current filters.",
+        description: "Adjust the filters or clear the search to explore all scripts.",
+      };
+    }
+    if (uploaderFilters.scripts) {
+      return {
+        title: "No scripts for this teammate",
+        description:
+          "Select another teammate or clear the filter to explore all available scripts.",
+      };
+    }
+    return {
+      title: "This folder is empty",
+      description: "Upload a file or folder to populate this space.",
+    };
+  })();
   return (
     <div className="space-y-6">
       <div className="grid gap-6 xl:grid-cols-[1.25fr_1fr]">
@@ -4449,14 +4603,8 @@ const renderScriptsTab = () => {
                 ) : (
                   <EmptyState
                     icon={Folder}
-                    title={
-                      uploaderFilters.scripts ? "No scripts for this teammate" : "This folder is empty"
-                    }
-                    description={
-                      uploaderFilters.scripts
-                        ? "Select another teammate or clear the filter to explore all available scripts."
-                        : "Upload a file or folder to populate this space."
-                    }
+                    title={scriptEmptyCopy.title}
+                    description={scriptEmptyCopy.description}
                   />
                 )}
               </div>
@@ -4472,6 +4620,38 @@ const renderScriptsTab = () => {
 
 const renderPromptsTab = () => {
   const selectedCount = selectedCounts.prompts;
+  const promptSearchActive =
+    isSearchActiveForCategory("prompts") && (searchQuery || searchConfig.mode === "user");
+  const promptEmptyCopy = (() => {
+    if (promptSearchActive) {
+      if (searchConfig.mode === "user" && searchConfig.user) {
+        return {
+          title: `No prompts uploaded by ${searchConfig.user}.`,
+          description: "Try a different teammate or clear the user filter to review every prompt.",
+        };
+      }
+      if (searchConfig.display) {
+        return {
+          title: `No prompts match “${searchConfig.display}”.`,
+          description: "Try another keyword or clear the filters to see more prompts.",
+        };
+      }
+      return {
+        title: "No prompts match the current filters.",
+        description: "Adjust the filters or clear the search to explore all prompts.",
+      };
+    }
+    if (uploaderFilters.prompts) {
+      return {
+        title: "No prompts for this teammate",
+        description: "Choose another uploader or clear the filter to browse all prompts.",
+      };
+    }
+    return {
+      title: "No prompts yet",
+      description: "Add your first prompt to keep it handy for future sessions.",
+    };
+  })();
   return (
     <div className="grid gap-6 xl:grid-cols-[1fr_1fr]">
         <Card className="border-[#30363d] bg-[#0d1117] text-white">
@@ -4554,12 +4734,8 @@ const renderPromptsTab = () => {
             ) : (
               <EmptyState
                 icon={FileText}
-                title={uploaderFilters.prompts ? "No prompts for this teammate" : "No prompts yet"}
-                description={
-                  uploaderFilters.prompts
-                    ? "Choose another uploader or clear the filter to browse all prompts."
-                    : "Add your first prompt to keep it handy for future sessions."
-                }
+                title={promptEmptyCopy.title}
+                description={promptEmptyCopy.description}
               />
             )}
           </CardContent>
@@ -4573,6 +4749,38 @@ const renderPromptsTab = () => {
 
 const renderLinksTab = () => {
   const selectedCount = selectedCounts.links;
+  const linkSearchActive =
+    isSearchActiveForCategory("links") && (searchQuery || searchConfig.mode === "user");
+  const linkEmptyCopy = (() => {
+    if (linkSearchActive) {
+      if (searchConfig.mode === "user" && searchConfig.user) {
+        return {
+          title: `No links uploaded by ${searchConfig.user}.`,
+          description: "Try another teammate or clear the user filter to browse every link.",
+        };
+      }
+      if (searchConfig.display) {
+        return {
+          title: `No links match “${searchConfig.display}”.`,
+          description: "Try another keyword or clear the filters to see more links.",
+        };
+      }
+      return {
+        title: "No links match the current filters.",
+        description: "Adjust the filters or clear the search to explore all saved links.",
+      };
+    }
+    if (uploaderFilters.links) {
+      return {
+        title: "No links for this teammate",
+        description: "Select a different uploader or clear the filter to view all saved links.",
+      };
+    }
+    return {
+      title: "No links saved",
+      description: "Keep your go-to resources a click away by adding them here.",
+    };
+  })();
   return (
     <div className="grid gap-6 xl:grid-cols-[1fr_1fr]">
         <Card className="border-[#30363d] bg-[#0d1117] text-white">
@@ -4651,12 +4859,8 @@ const renderLinksTab = () => {
             ) : (
               <EmptyState
                 icon={Link2}
-                title={uploaderFilters.links ? "No links for this teammate" : "No links saved"}
-                description={
-                  uploaderFilters.links
-                    ? "Select a different uploader or clear the filter to view all saved links."
-                    : "Keep your go-to resources a click away by adding them here."
-                }
+                title={linkEmptyCopy.title}
+                description={linkEmptyCopy.description}
               />
             )}
           </CardContent>
@@ -5015,6 +5219,11 @@ const renderBinTab = () => {
             {vaultError && (
               <span className="rounded-full border border-rose-500/40 bg-rose-500/15 px-3 py-1 text-xs text-rose-100">
                 {vaultError}
+              </span>
+            )}
+            {searchFeedback && (
+              <span className="rounded-full border border-amber-500/40 bg-amber-500/10 px-3 py-1 text-xs text-amber-200">
+                {searchFeedback}
               </span>
             )}
             {searchSummary && (

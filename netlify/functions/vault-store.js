@@ -1,5 +1,17 @@
 const { S3Client, GetObjectCommand, PutObjectCommand } = require("@aws-sdk/client-s3");
 
+const allowCors = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST,OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
+
+const jsonResponse = (statusCode, payload) => ({
+  statusCode,
+  headers: { ...allowCors, "Content-Type": "application/json" },
+  body: JSON.stringify(payload),
+});
+
 const DEFAULT_R2_CONFIG = {
   R2_ACCESS_KEY_ID: "33f46d555ee615172b0ce1cb58017638",
   R2_SECRET_ACCESS_KEY:
@@ -153,23 +165,27 @@ function updateItems(items, params, updates) {
 }
 
 exports.handler = async (event) => {
+  if (event.httpMethod === "OPTIONS") {
+    return { statusCode: 204, headers: allowCors, body: "" };
+  }
+
   if (event.httpMethod !== "POST") {
-    return { statusCode: 405, body: JSON.stringify({ error: "Method not allowed" }) };
+    return jsonResponse(405, { error: "Method not allowed" });
   }
 
   if (!accountId || !accessKeyId || !secretAccessKey) {
-    return { statusCode: 500, body: JSON.stringify({ error: "R2 credentials are not configured." }) };
+    return jsonResponse(500, { error: "R2 credentials are not configured." });
   }
 
   const { path, method: rawMethod = "GET", body } = parseRequest(event);
   if (!path) {
-    return { statusCode: 400, body: JSON.stringify({ error: "Missing path." }) };
+    return jsonResponse(400, { error: "Missing path." });
   }
 
   const [tablePart, queryString = ""] = String(path).split("?");
   const table = tablePart.trim();
   if (!table) {
-    return { statusCode: 400, body: JSON.stringify({ error: "Missing table name." }) };
+    return jsonResponse(400, { error: "Missing table name." });
   }
 
   const params = new URLSearchParams(queryString);
@@ -183,7 +199,7 @@ exports.handler = async (event) => {
 
     if (method === "GET") {
       const items = filterItems(store[table], params);
-      return { statusCode: 200, body: JSON.stringify(items), headers: { "Content-Type": "application/json" } };
+      return jsonResponse(200, items);
     }
 
     if (method === "POST") {
@@ -191,7 +207,7 @@ exports.handler = async (event) => {
       const rows = Array.isArray(payload) ? payload : [];
       store[table] = [...store[table], ...rows];
       await saveStore(store);
-      return { statusCode: 200, body: JSON.stringify(rows), headers: { "Content-Type": "application/json" } };
+      return jsonResponse(200, rows);
     }
 
     if (method === "PATCH") {
@@ -199,26 +215,19 @@ exports.handler = async (event) => {
       const { updated, changed } = updateItems(store[table], params, updates);
       store[table] = updated;
       await saveStore(store);
-      return {
-        statusCode: 200,
-        body: JSON.stringify(changed),
-        headers: { "Content-Type": "application/json" },
-      };
+      return jsonResponse(200, changed);
     }
 
     if (method === "DELETE") {
       const keep = store[table].filter((item) => filterItems([item], params).length === 0);
       store[table] = keep;
       await saveStore(store);
-      return { statusCode: 200, body: JSON.stringify([]), headers: { "Content-Type": "application/json" } };
+      return jsonResponse(200, []);
     }
 
-    return { statusCode: 405, body: JSON.stringify({ error: "Unsupported method." }) };
+    return jsonResponse(405, { error: "Unsupported method." });
   } catch (error) {
     console.error("Vault store error", error);
-    return {
-      statusCode: 500,
-      body: JSON.stringify({ error: error.message || "Unexpected storage error." }),
-    };
+    return jsonResponse(500, { error: error.message || "Unexpected storage error." });
   }
 };
