@@ -19,7 +19,6 @@ import {
   MoreHorizontal,
   Layers,
   Cloud,
-  Info,
 } from "lucide-react";
 import { Button } from "./components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
@@ -58,99 +57,32 @@ const categories = [
 
 const TRASH_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
-const DEFAULT_SUPABASE_PROJECT_REF = "cauostpphtbzfyejffhk";
-const DEFAULT_SUPABASE_URL = `https://${DEFAULT_SUPABASE_PROJECT_REF}.supabase.co`;
-const DEFAULT_SUPABASE_ANON_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNhdW9zdHBwaHRiemZ5ZWpmZmhrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTk5NjAyMjQsImV4cCI6MjA3NTUzNjIyNH0.JTucDx5zwBf2tk8LndLumLXInKc5BFDhvjxO9fZd7kI";
+const VAULT_STORE_FUNCTION = "/api/vault-store";
 
-const resolveEnv = (value, fallback = "") =>
-  typeof value === "string" && value.trim().length > 0 ? value.trim() : fallback;
-
-const normaliseSupabaseUrl = (value, fallback = "") => {
-  const trimmed = resolveEnv(value, fallback);
-  if (!trimmed) {
-    return "";
-  }
-  const sanitized = trimmed.replace(/\/$/, "");
-  const dashboardMatch = sanitized.match(/supabase\.com\/dashboard\/project\/([a-z0-9-]+)/i);
-  if (dashboardMatch) {
-    return `https://${dashboardMatch[1]}.supabase.co`;
-  }
-  if (/^[a-z0-9-]+$/i.test(sanitized) && !sanitized.includes(".")) {
-    return `https://${sanitized}.supabase.co`;
-  }
-  return sanitized;
-};
-
-const SUPABASE_URL = normaliseSupabaseUrl(
-  import.meta.env.VITE_SUPABASE_URL,
-  DEFAULT_SUPABASE_URL
-);
-const SUPABASE_ANON_KEY = resolveEnv(
-  import.meta.env.VITE_SUPABASE_ANON_KEY ?? import.meta.env.VITE_SUPABASE_KEY,
-  DEFAULT_SUPABASE_ANON_KEY
-);
-const SUPABASE_REST_URL = SUPABASE_URL
-  ? `${SUPABASE_URL.replace(/\/$/, "")}/rest/v1`
-  : "";
-
-function parseSupabaseErrorPayload(payload) {
-  if (!payload) return null;
-  if (typeof payload === "string") {
-    try {
-      const parsed = JSON.parse(payload);
-      return parseSupabaseErrorPayload(parsed) ?? { message: payload };
-    } catch (error) {
-      return { message: payload };
-    }
-  }
-  if (typeof payload === "object") {
-    const { message, code, details, hint } = payload;
-    return {
-      message: typeof message === "string" ? message : "",
-      code: typeof code === "string" ? code : undefined,
-      details: typeof details === "string" ? details : undefined,
-      hint: typeof hint === "string" ? hint : undefined,
-    };
-  }
-  return null;
-}
-
-async function supabaseRequest(path, { method = "GET", headers = {}, body, signal } = {}) {
-  if (!SUPABASE_REST_URL) {
-    throw new Error("Supabase credentials are not configured.");
-  }
-  const hasBody = body !== undefined;
-  const response = await fetch(`${SUPABASE_REST_URL}/${path}`, {
-    method,
+async function vaultRequest(path, { method = "GET", body, signal } = {}) {
+  const response = await fetch(VAULT_STORE_FUNCTION, {
+    method: "POST",
     signal,
-    headers: {
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
-      ...(hasBody ? { "Content-Type": "application/json" } : {}),
-      ...headers,
-    },
-    body,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path, method, body }),
   });
+
   const contentType = response.headers.get("Content-Type") || "";
   const rawText = await response.text();
 
   if (!response.ok) {
-    const parsed = parseSupabaseErrorPayload(rawText);
-    const error = new Error(
-      parsed?.message || rawText || `Supabase request failed (${response.status})`
-    );
-    if (parsed?.code) {
-      error.code = parsed.code;
+    let message = rawText || "Storage request failed.";
+    try {
+      const parsed = JSON.parse(rawText);
+      if (parsed?.error) {
+        message = parsed.error;
+      }
+    } catch (error) {
+      // Ignore JSON parse failures – fall back to raw text.
     }
-    if (parsed?.details) {
-      error.details = parsed.details;
-    }
-    if (parsed?.hint) {
-      error.hint = parsed.hint;
-    }
-    error.status = response.status;
-    throw error;
+    const storageError = new Error(message);
+    storageError.status = response.status;
+    throw storageError;
   }
 
   if (!rawText || !rawText.trim()) {
@@ -161,7 +93,7 @@ async function supabaseRequest(path, { method = "GET", headers = {}, body, signa
     try {
       return JSON.parse(rawText);
     } catch (error) {
-      console.warn("Failed to parse Supabase JSON response", error);
+      console.warn("Failed to parse storage JSON response", error);
       return null;
     }
   }
@@ -508,7 +440,7 @@ const ALLOWED_EMAILS_KEY = "vaulthub-allowed-emails";
 const USERS_KEY = "vaulthub-users";
 const CURRENT_USER_KEY = "vaulthub-active-user";
 
-const defaultSupabaseSchema = {
+const defaultVaultSchema = {
   allowed_emails: {
     table: "allowed_emails",
     columns: {
@@ -926,67 +858,7 @@ function cloneSchema(schema) {
   return result;
 }
 
-function parseMissingColumnError(error) {
-  if (!error || !error.message) {
-    return null;
-  }
-  const message = String(error.message);
-  const match = message.match(/could not find the '([^']+)' column of '([^']+)'/i);
-  if (match) {
-    return { column: match[1], table: match[2] };
-  }
-  return null;
-}
-
-function resolveMissingColumn(schema, tableKeyHint, info) {
-  if (!info) return null;
-  const normalizedColumn = String(info.column || "").toLowerCase();
-  const normalizedTable = String(info.table || "")
-    .toLowerCase()
-    .replace(/^public\./, "");
-
-  const candidateKeys = [];
-  if (tableKeyHint) {
-    candidateKeys.push(tableKeyHint);
-  }
-  for (const [key, config] of Object.entries(schema)) {
-    if (candidateKeys.includes(key)) continue;
-    const tableName = String(config.table || key).toLowerCase();
-    if (!normalizedTable || tableName === normalizedTable || key.toLowerCase() === normalizedTable) {
-      candidateKeys.push(key);
-    }
-  }
-
-  for (const key of candidateKeys) {
-    const config = schema[key];
-    if (!config) continue;
-    for (const [logicalKey, columnName] of Object.entries(config.columns)) {
-      if (!columnName) continue;
-      if (columnName.toLowerCase() !== normalizedColumn) continue;
-      if (!optionalColumns[key]?.has(logicalKey)) {
-        return null;
-      }
-      const updated = cloneSchema(schema);
-      updated[key] = {
-        ...updated[key],
-        columns: {
-          ...updated[key].columns,
-          [logicalKey]: null,
-        },
-      };
-      return {
-        schema: updated,
-        tableKey: key,
-        logicalKey,
-        columnName,
-      };
-    }
-  }
-
-  return null;
-}
-
-const shapeSupabasePayload = (tableSchema, canonical) => {
+const shapeVaultPayload = (tableSchema, canonical) => {
   const result = {};
   if (!tableSchema || !tableSchema.columns) {
     return { ...canonical };
@@ -1026,7 +898,7 @@ const getColumnName = (row, column) => {
   return row?.[column];
 };
 
-const mapPromptRow = (row, columns = defaultSupabaseSchema.prompts.columns) => {
+const mapPromptRow = (row, columns = defaultVaultSchema.prompts.columns) => {
   const rawNotes = getColumnName(row, columns.notes);
   const rawDescription = getColumnName(row, columns.description);
   const fallback =
@@ -1079,7 +951,7 @@ const mapPromptRow = (row, columns = defaultSupabaseSchema.prompts.columns) => {
   };
 };
 
-const mapLinkRow = (row, columns = defaultSupabaseSchema.links.columns) => {
+const mapLinkRow = (row, columns = defaultVaultSchema.links.columns) => {
   const rawNotes = getColumnName(row, columns.notes);
   const fallback = decodeLinkFallback(typeof rawNotes === "string" ? rawNotes : null);
   const resolvedNotes = (() => {
@@ -1119,7 +991,7 @@ const mapLinkRow = (row, columns = defaultSupabaseSchema.links.columns) => {
   };
 };
 
-const mapScriptRow = (row, columns = defaultSupabaseSchema.scripts.columns) => {
+const mapScriptRow = (row, columns = defaultVaultSchema.scripts.columns) => {
   const rawNotes = getColumnName(row, columns.notes);
   const fallback = decodeScriptFallback(typeof rawNotes === "string" ? rawNotes : null);
   const resolvedNotes = (() => {
@@ -1170,61 +1042,6 @@ const mapScriptRow = (row, columns = defaultSupabaseSchema.scripts.columns) => {
   };
 };
 
-const buildSupabaseSchemaMapping = (rows = []) => {
-  const byTable = new Map();
-  for (const entry of rows) {
-    const tableName = String(entry.table_name || "").toLowerCase();
-    const columnName = String(entry.column_name || "");
-    if (!tableName || !columnName) continue;
-    if (!byTable.has(tableName)) {
-      byTable.set(tableName, []);
-    }
-    byTable.get(tableName).push(columnName);
-  }
-
-  const mapping = {};
-  const missing = [];
-
-  for (const [table, config] of Object.entries(defaultSupabaseSchema)) {
-    const availableColumns = new Map();
-    for (const columnName of byTable.get(table) ?? []) {
-      availableColumns.set(columnName.toLowerCase(), columnName);
-    }
-
-    const resolvedColumns = {};
-    for (const [logicalKey, defaultColumn] of Object.entries(config.columns)) {
-      const synonyms = [defaultColumn, ...(columnSynonyms[logicalKey] ?? [])];
-      let resolved = null;
-      for (const synonym of synonyms) {
-        const candidate = availableColumns.get(synonym.toLowerCase());
-        if (candidate) {
-          resolved = candidate;
-          break;
-        }
-      }
-
-      if (!resolved) {
-        const isOptional = optionalColumns[table]?.has(logicalKey);
-        if (!isOptional) {
-          missing.push({ table, column: defaultColumn });
-          resolvedColumns[logicalKey] = defaultColumn;
-        } else {
-          resolvedColumns[logicalKey] = null;
-        }
-      } else {
-        resolvedColumns[logicalKey] = resolved;
-      }
-    }
-
-    mapping[table] = {
-      ...config,
-      columns: resolvedColumns,
-    };
-  }
-
-  return { mapping, missing };
-};
-
 function ensureAdmins(list) {
   const byEmail = new Map(list.map((user) => [user.email.toLowerCase(), user]));
   for (const admin of initialUsers) {
@@ -1236,28 +1053,12 @@ function ensureAdmins(list) {
   return Array.from(byEmail.values());
 }
 
-const SUPABASE_POLICY_GUIDE =
-  "Supabase blocked this action because row-level security is still enabled. Run the policy script from the README (see the Supabase policies section) inside your project's SQL editor and refresh VaultHub.";
-
-function formatRowLevelSecurityMessage(error) {
-  const tableMatch = error?.message?.match(/table \"([^\"]+)\"/i);
-  const tableSuffix = tableMatch ? ` for the "${tableMatch[1]}" table` : "";
-  const hint = error?.hint ? ` Hint: ${error.hint}` : "";
-  return `${SUPABASE_POLICY_GUIDE.replace(
-    "this action",
-    `this action${tableSuffix}`
-  )}${hint}`;
-}
-
-function formatSupabaseErrorMessage(error, fallback) {
+function formatVaultErrorMessage(error, fallback) {
   if (!error) {
     return fallback;
   }
 
   const message = typeof error.message === "string" ? error.message : "";
-  if (error.code === "42501" || /row-level security/i.test(message)) {
-    return formatRowLevelSecurityMessage(error);
-  }
   if (error.details && typeof error.details === "string" && error.details.trim().length) {
     return `${message || fallback}\n${error.details}`;
   }
@@ -1269,7 +1070,7 @@ function formatSupabaseErrorMessage(error, fallback) {
 
 export default function App() {
   const isDraftMode = import.meta.env.MODE === "draft";
-  const supabaseReady = Boolean(SUPABASE_REST_URL && SUPABASE_ANON_KEY);
+  const vaultReady = true;
 
   const [allowedEmails, setAllowedEmails] = useState(() => {
     if (typeof window === "undefined") {
@@ -1328,17 +1129,13 @@ export default function App() {
   const [trashedScripts, setTrashedScripts] = useState([]);
   const [trashedLinks, setTrashedLinks] = useState([]);
 
-  const [supabaseSchema, setSupabaseSchema] = useState(() => cloneSchema(defaultSupabaseSchema));
+  const vaultSchema = useMemo(() => cloneSchema(defaultVaultSchema), []);
 
-  const [vaultError, setVaultError] = useState(() =>
-    supabaseReady ? "" : "Supabase credentials are missing. Update your environment variables to enable cloud storage."
-  );
+  const [vaultError, setVaultError] = useState("");
   const [vaultStatus, setVaultStatus] = useState("");
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
 
-  const [missingSchemaColumns, setMissingSchemaColumns] = useState([]);
-  const [schemaWarningDismissed, setSchemaWarningDismissed] = useState(false);
 
   const [currentScriptFolderId, setCurrentScriptFolderId] = useState(null);
   const [selectedItems, setSelectedItems] = useState([]);
@@ -1379,9 +1176,9 @@ export default function App() {
   const folderInputRef = useRef(null);
   const contextMenuRef = useRef(null);
 
-  const storageReady = supabaseReady;
-  const describeSupabaseError = useCallback(
-    (error, fallback) => formatSupabaseErrorMessage(error, fallback),
+  const storageReady = vaultReady;
+  const describeVaultError = useCallback(
+    (error, fallback) => formatVaultErrorMessage(error, fallback),
     []
   );
 
@@ -1480,13 +1277,13 @@ export default function App() {
       if (allowedEmails.includes(email)) {
         return true;
       }
-      if (!supabaseReady || !supabaseSchema.allowed_emails?.columns?.email) {
+      if (!vaultReady || !vaultSchema.allowed_emails?.columns?.email) {
         return false;
       }
       try {
-        const column = supabaseSchema.allowed_emails.columns.email;
-        const table = supabaseSchema.allowed_emails.table;
-        const response = await supabaseRequest(
+        const column = vaultSchema.allowed_emails.columns.email;
+        const table = vaultSchema.allowed_emails.table;
+        const response = await vaultRequest(
           `${table}?${encodeURIComponent(column)}=eq.${encodeURIComponent(email)}`
         );
         if (Array.isArray(response) && response.length) {
@@ -1497,27 +1294,27 @@ export default function App() {
           return true;
         }
       } catch (error) {
-        console.warn("Failed to verify Supabase allowlist", error);
+        console.warn("Failed to verify Cloudflare allowlist", error);
       }
       return false;
     },
-    [allowedEmails, supabaseReady, supabaseSchema]
+    [allowedEmails, vaultReady, vaultSchema]
   );
   const connectionLabel = useMemo(() => {
-    if (!supabaseReady) return "Storage not configured";
-    if (vaultError) return "Supabase issue";
-    if (workspaceLoading) return "Syncing Supabase…";
-    return "Connected to Supabase";
-  }, [supabaseReady, vaultError, workspaceLoading]);
+    if (!vaultReady) return "Storage not configured";
+    if (vaultError) return "Storage issue";
+    if (workspaceLoading) return "Syncing Cloudflare R2…";
+    return "Connected to Cloudflare R2";
+  }, [vaultReady, vaultError, workspaceLoading]);
   const connectionClasses = useMemo(() => {
-    if (!supabaseReady) {
+    if (!vaultReady) {
       return "border-white/10 bg-[#161b22] text-slate-300";
     }
     if (vaultError) {
       return "border-amber-400/30 bg-amber-500/10 text-amber-100";
     }
     return "border-[#58a6ff]/40 bg-[#0b2f53] text-[#9cc4ff]";
-  }, [supabaseReady, vaultError]);
+  }, [vaultReady, vaultError]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1582,69 +1379,10 @@ export default function App() {
     window.localStorage.setItem(USERS_KEY, JSON.stringify(users));
   }, [users]);
 
-  const executeSupabase = useCallback(
-    async (tableKey, action) => {
-      let schema = supabaseSchema;
-      const resolvedColumns = new Set();
-      // Keep retrying while we can progressively disable optional columns that Supabase rejects.
-      // This accounts for projects that are missing many optional fields without failing after a
-      // fixed number of attempts.
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        try {
-          return await action(schema);
-        } catch (error) {
-          const info = parseMissingColumnError(error);
-          const resolved = resolveMissingColumn(schema, tableKey, info);
-          if (!resolved) {
-            throw error;
-          }
-          const key = `${resolved.tableKey}:${resolved.logicalKey}`;
-          if (resolvedColumns.has(key)) {
-            // We've already attempted to disable this column, so bubble the error up instead of
-            // looping forever.
-            throw error;
-          }
-          resolvedColumns.add(key);
-          schema = resolved.schema;
-          setSupabaseSchema(resolved.schema);
-          setMissingSchemaColumns((prev) => {
-            if (prev.some((entry) => entry.key === key)) {
-              return prev;
-            }
-            const tableLabel = resolved.tableKey.charAt(0).toUpperCase() + resolved.tableKey.slice(1);
-            const columnLabel =
-              resolved.logicalKey === resolved.columnName
-                ? resolved.columnName
-                : `${resolved.logicalKey} (${resolved.columnName})`;
-            return [
-              ...prev,
-              {
-                key,
-                table: tableLabel,
-                column: columnLabel,
-              },
-            ];
-          });
-        }
-      }
-    },
-    [supabaseSchema, setSupabaseSchema, setMissingSchemaColumns]
+  const executeVault = useCallback(
+    async (tableKey, action) => action(vaultSchema),
+    [vaultSchema]
   );
-
-  const schemaWarningText = useMemo(() => {
-    if (!missingSchemaColumns.length) return "";
-    const formatted = missingSchemaColumns
-      .map((entry) => `${entry.table} ${entry.column}`)
-      .join(" • ");
-    return `Optional Supabase fields were missing and have been disabled automatically (${formatted}). Uploads will continue using the available columns.`;
-  }, [missingSchemaColumns]);
-
-  useEffect(() => {
-    if (missingSchemaColumns.length) {
-      setSchemaWarningDismissed(false);
-    }
-  }, [missingSchemaColumns]);
 
   const collectScriptBranchIds = useCallback(
     (rootId, sourceItems = scripts) => {
@@ -1670,7 +1408,7 @@ export default function App() {
 
       const deleteByIds = async (tableKey, ids) => {
         if (!ids.length) return;
-        await executeSupabase(tableKey, async (schema) => {
+        await executeVault(tableKey, async (schema) => {
           const config = schema[tableKey];
           const column = config.columns.id ?? "id";
           const table = config.table;
@@ -1683,7 +1421,7 @@ export default function App() {
               .join(",");
             if (!idList) continue;
             const encodedValues = encodeURIComponent(`(${idList})`);
-            await supabaseRequest(
+            await vaultRequest(
               `${table}?${encodeURIComponent(column)}=in.${encodedValues}`,
               { method: "DELETE" }
             );
@@ -1708,7 +1446,7 @@ export default function App() {
         console.warn("Failed to clean up expired trash", error);
       }
     },
-    [executeSupabase, storageReady]
+    [executeVault, storageReady]
   );
 
   const partitionTrashEntries = useCallback((items) => {
@@ -1734,25 +1472,25 @@ export default function App() {
   }, []);
 
   const refreshWorkspace = useCallback(async () => {
-    if (!supabaseReady) {
+    if (!vaultReady) {
       return;
     }
     try {
       setWorkspaceLoading(true);
-      setVaultStatus("Syncing workspace from Supabase…");
+      setVaultStatus("Syncing workspace from Cloudflare R2…");
       setVaultError("");
 
       const [allowedEmailRows, promptsData, linksData, scriptsData] = await Promise.all([
-        supabaseSchema.allowed_emails.columns.email
-          ? supabaseRequest(`${supabaseSchema.allowed_emails.table}?select=*`)
+        vaultSchema.allowed_emails.columns.email
+          ? vaultRequest(`${vaultSchema.allowed_emails.table}?select=*`)
           : Promise.resolve(null),
-        supabaseRequest(`${supabaseSchema.prompts.table}?select=*`),
-        supabaseRequest(`${supabaseSchema.links.table}?select=*`),
-        supabaseRequest(`${supabaseSchema.scripts.table}?select=*`),
+        vaultRequest(`${vaultSchema.prompts.table}?select=*`),
+        vaultRequest(`${vaultSchema.links.table}?select=*`),
+        vaultRequest(`${vaultSchema.scripts.table}?select=*`),
       ]);
 
       if (Array.isArray(allowedEmailRows)) {
-        const emailColumn = supabaseSchema.allowed_emails.columns.email;
+        const emailColumn = vaultSchema.allowed_emails.columns.email;
         const fetched = allowedEmailRows
           .map((row) => String(getColumnName(row, emailColumn) || "").trim().toLowerCase())
           .filter(Boolean);
@@ -1761,16 +1499,16 @@ export default function App() {
         );
         if (missingDefaults.length) {
           try {
-            await executeSupabase("allowed_emails", async (schema) => {
+            await executeVault("allowed_emails", async (schema) => {
               const seedRows = missingDefaults.map((email) =>
-                shapeSupabasePayload(schema.allowed_emails, {
+                shapeVaultPayload(schema.allowed_emails, {
                   email,
                   role: protectedAdminEmails.has(email) ? "admin" : "member",
                   created_at: new Date().toISOString(),
                 })
               );
               if (!seedRows.length) return;
-              await supabaseRequest(schema.allowed_emails.table, {
+              await vaultRequest(schema.allowed_emails.table, {
                 method: "POST",
                 headers: { Prefer: "resolution=ignore-duplicates" },
                 body: JSON.stringify(seedRows),
@@ -1780,9 +1518,9 @@ export default function App() {
           } catch (error) {
             console.warn("Failed to seed default allowed emails", error);
             setVaultError(
-              describeSupabaseError(
+              describeVaultError(
                 error,
-                "Unable to seed the default admin allowlist in Supabase."
+                "Unable to seed the default admin allowlist in Cloudflare R2."
               )
             );
           }
@@ -1794,13 +1532,13 @@ export default function App() {
       }
 
       const promptEntries = (promptsData ?? []).map((row) =>
-        mapPromptRow(row, supabaseSchema.prompts.columns)
+        mapPromptRow(row, vaultSchema.prompts.columns)
       );
       const linkEntries = (linksData ?? []).map((row) =>
-        mapLinkRow(row, supabaseSchema.links.columns)
+        mapLinkRow(row, vaultSchema.links.columns)
       );
       const scriptEntries = (scriptsData ?? []).map((row) =>
-        mapScriptRow(row, supabaseSchema.scripts.columns)
+        mapScriptRow(row, vaultSchema.scripts.columns)
       );
 
       const promptPartitions = partitionTrashEntries(promptEntries);
@@ -1839,22 +1577,22 @@ export default function App() {
         });
       }
     } catch (error) {
-      console.error("Failed to sync Supabase", error);
+      console.error("Failed to sync Cloudflare R2", error);
       setVaultError(
-        describeSupabaseError(error, "Unable to sync the Supabase workspace.")
+        describeVaultError(error, "Unable to sync the Cloudflare vault workspace.")
       );
     } finally {
       setWorkspaceLoading(false);
       setVaultStatus("");
     }
-  }, [supabaseReady, supabaseSchema, executeSupabase, partitionTrashEntries, cleanupExpiredTrash, describeSupabaseError]);
+  }, [vaultReady, vaultSchema, executeVault, partitionTrashEntries, cleanupExpiredTrash, describeVaultError]);
 
   useEffect(() => {
-    if (!supabaseReady) {
+    if (!vaultReady) {
       return;
     }
     refreshWorkspace();
-  }, [supabaseReady, refreshWorkspace]);
+  }, [vaultReady, refreshWorkspace]);
 
   useEffect(() => {
     const handleClick = (event) => {
@@ -2090,17 +1828,17 @@ export default function App() {
         reference_size: referenceData?.size ?? null,
         reference_content: referenceData?.content ?? null,
       };
-      const entry = await executeSupabase("prompts", async (schema) => {
+      const entry = await executeVault("prompts", async (schema) => {
         const shapedPayload = applyPromptFallbackColumns(
           schema.prompts,
-          shapeSupabasePayload(schema.prompts, payload),
+          shapeVaultPayload(schema.prompts, payload),
           payload
         );
         updateUploadProgress("prompts", progressId, {
-          label: "Uploading to Supabase…",
+          label: "Uploading to Cloudflare R2…",
           value: 45,
         });
-        const data = await supabaseRequest(schema.prompts.table, {
+        const data = await vaultRequest(schema.prompts.table, {
           method: "POST",
           headers: { Prefer: "return=representation" },
           body: JSON.stringify([shapedPayload]),
@@ -2121,7 +1859,7 @@ export default function App() {
         failUploadProgress("prompts", progressId, "Prompt upload failed");
       }
       setVaultError(
-        describeSupabaseError(error, "Unable to save the prompt to Supabase.")
+        describeVaultError(error, "Unable to save the prompt to Cloudflare R2.")
       );
     } finally {
       setIsProcessing(false);
@@ -2165,17 +1903,17 @@ export default function App() {
         reference_size: referenceData?.size ?? null,
         reference_content: referenceData?.content ?? null,
       };
-      const entry = await executeSupabase("links", async (schema) => {
+      const entry = await executeVault("links", async (schema) => {
         const shapedPayload = applyLinkFallbackColumns(
           schema.links,
-          shapeSupabasePayload(schema.links, payload),
+          shapeVaultPayload(schema.links, payload),
           payload
         );
         updateUploadProgress("links", progressId, {
-          label: "Uploading to Supabase…",
+          label: "Uploading to Cloudflare R2…",
           value: 45,
         });
-        const data = await supabaseRequest(schema.links.table, {
+        const data = await vaultRequest(schema.links.table, {
           method: "POST",
           headers: { Prefer: "return=representation" },
           body: JSON.stringify([shapedPayload]),
@@ -2196,7 +1934,7 @@ export default function App() {
         failUploadProgress("links", progressId, "Link upload failed");
       }
       setVaultError(
-        describeSupabaseError(error, "Unable to save the link to Supabase.")
+        describeVaultError(error, "Unable to save the link to Cloudflare R2.")
       );
     } finally {
       setIsProcessing(false);
@@ -2375,17 +2113,17 @@ export default function App() {
           reference_size: referenceData?.size ?? null,
           reference_content: referenceData?.content ?? null,
         };
-        const entry = await executeSupabase("scripts", async (schema) => {
+        const entry = await executeVault("scripts", async (schema) => {
           const shapedPayload = applyScriptFallbackColumns(
             schema.scripts,
-            shapeSupabasePayload(schema.scripts, payload),
+            shapeVaultPayload(schema.scripts, payload),
             payload
           );
           updateUploadProgress("scripts", progressId, {
             label: "Saving metadata…",
             value: 55,
           });
-          const data = await supabaseRequest(schema.scripts.table, {
+          const data = await vaultRequest(schema.scripts.table, {
             method: "POST",
             headers: { Prefer: "return=representation" },
             body: JSON.stringify([shapedPayload]),
@@ -2433,19 +2171,19 @@ export default function App() {
           });
         },
       });
-      const inserted = await executeSupabase("scripts", async (schema) => {
+      const inserted = await executeVault("scripts", async (schema) => {
         const shapedRows = rows.map((row) =>
           applyScriptFallbackColumns(
             schema.scripts,
-            shapeSupabasePayload(schema.scripts, row),
+            shapeVaultPayload(schema.scripts, row),
             row
           )
         );
         updateUploadProgress("scripts", progressId, {
-          label: "Uploading to Supabase…",
+          label: "Uploading to Cloudflare R2…",
           value: 75,
         });
-        const data = await supabaseRequest(schema.scripts.table, {
+        const data = await vaultRequest(schema.scripts.table, {
           method: "POST",
           headers: { Prefer: "return=representation" },
           body: JSON.stringify(shapedRows),
@@ -2469,7 +2207,7 @@ export default function App() {
         failUploadProgress("scripts", progressId, "Script upload failed");
       }
       setVaultError(
-        describeSupabaseError(error, "Unable to save the scripts to Supabase.")
+        describeVaultError(error, "Unable to save the scripts to Cloudflare R2.")
       );
     } finally {
       setIsProcessing(false);
@@ -2556,17 +2294,17 @@ export default function App() {
         const ids = new Set(targets.map((entry) => entry.id).filter(Boolean));
         ids.forEach((id) => idsToClear.add(id));
         const deletedAt = permanent ? null : new Date().toISOString();
-        await executeSupabase("prompts", async (schema) => {
+        await executeVault("prompts", async (schema) => {
           const config = schema.prompts;
           const path = buildInFilterPath(config, "id", Array.from(ids));
           if (permanent) {
-            await supabaseRequest(path, { method: "DELETE" });
+            await vaultRequest(path, { method: "DELETE" });
             return;
           }
-          const basePayload = shapeSupabasePayload(config, { deleted_at: deletedAt });
+          const basePayload = shapeVaultPayload(config, { deleted_at: deletedAt });
           const needsFallback = !config?.columns?.deleted_at || !Object.keys(basePayload).length;
           if (!needsFallback) {
-            await supabaseRequest(path, {
+            await vaultRequest(path, {
               method: "PATCH",
               body: JSON.stringify(basePayload),
             });
@@ -2585,11 +2323,11 @@ export default function App() {
             };
             const shaped = applyPromptFallbackColumns(
               config,
-              shapeSupabasePayload(config, canonical),
+              shapeVaultPayload(config, canonical),
               canonical,
               entry.fallbackData
             );
-            await supabaseRequest(buildFilterPath(config, "id", entry.id), {
+            await vaultRequest(buildFilterPath(config, "id", entry.id), {
               method: "PATCH",
               body: JSON.stringify(shaped),
             });
@@ -2614,17 +2352,17 @@ export default function App() {
         const ids = new Set(targets.map((entry) => entry.id).filter(Boolean));
         ids.forEach((id) => idsToClear.add(id));
         const deletedAt = permanent ? null : new Date().toISOString();
-        await executeSupabase("links", async (schema) => {
+        await executeVault("links", async (schema) => {
           const config = schema.links;
           const path = buildInFilterPath(config, "id", Array.from(ids));
           if (permanent) {
-            await supabaseRequest(path, { method: "DELETE" });
+            await vaultRequest(path, { method: "DELETE" });
             return;
           }
-          const basePayload = shapeSupabasePayload(config, { deleted_at: deletedAt });
+          const basePayload = shapeVaultPayload(config, { deleted_at: deletedAt });
           const needsFallback = !config?.columns?.deleted_at || !Object.keys(basePayload).length;
           if (!needsFallback) {
-            await supabaseRequest(path, {
+            await vaultRequest(path, {
               method: "PATCH",
               body: JSON.stringify(basePayload),
             });
@@ -2642,11 +2380,11 @@ export default function App() {
             };
             const shaped = applyLinkFallbackColumns(
               config,
-              shapeSupabasePayload(config, canonical),
+              shapeVaultPayload(config, canonical),
               canonical,
               entry.fallbackData
             );
-            await supabaseRequest(buildFilterPath(config, "id", entry.id), {
+            await vaultRequest(buildFilterPath(config, "id", entry.id), {
               method: "PATCH",
               body: JSON.stringify(shaped),
             });
@@ -2678,16 +2416,16 @@ export default function App() {
         idValues.forEach((value) => idsToClear.add(value));
         if (idValues.length) {
           const deletedAt = permanent ? null : new Date().toISOString();
-          await executeSupabase("scripts", async (schema) => {
+          await executeVault("scripts", async (schema) => {
             const config = schema.scripts;
             const filter = buildInFilterPath(config, "id", idValues);
             if (permanent) {
-              await supabaseRequest(filter, { method: "DELETE" });
+              await vaultRequest(filter, { method: "DELETE" });
             } else {
-              const basePayload = shapeSupabasePayload(config, { deleted_at: deletedAt });
+              const basePayload = shapeVaultPayload(config, { deleted_at: deletedAt });
               const needsFallback = !config?.columns?.deleted_at || !Object.keys(basePayload).length;
               if (!needsFallback) {
-                await supabaseRequest(filter, {
+                await vaultRequest(filter, {
                   method: "PATCH",
                   body: JSON.stringify(basePayload),
                 });
@@ -2706,11 +2444,11 @@ export default function App() {
                   };
                   const shaped = applyScriptFallbackColumns(
                     config,
-                    shapeSupabasePayload(config, canonical),
+                    shapeVaultPayload(config, canonical),
                     canonical,
                     entry.fallbackData
                   );
-                  await supabaseRequest(buildFilterPath(config, "id", value), {
+                  await vaultRequest(buildFilterPath(config, "id", value), {
                     method: "PATCH",
                     body: JSON.stringify(shaped),
                   });
@@ -2742,7 +2480,7 @@ export default function App() {
     } catch (error) {
       console.error("Failed to delete item", error);
       setVaultError(
-        describeSupabaseError(error, "Unable to delete the item from Supabase.")
+        describeVaultError(error, "Unable to delete the item from Cloudflare R2.")
       );
     } finally {
       setIsProcessing(false);
@@ -2760,13 +2498,13 @@ export default function App() {
       setVaultError("");
 
       if (category === "prompts") {
-        await executeSupabase("prompts", async (schema) => {
+        await executeVault("prompts", async (schema) => {
           const config = schema.prompts;
           const path = buildFilterPath(config, "id", item.id);
-          const basePayload = shapeSupabasePayload(config, { deleted_at: null });
+          const basePayload = shapeVaultPayload(config, { deleted_at: null });
           const needsFallback = !config?.columns?.deleted_at || !Object.keys(basePayload).length;
           if (!needsFallback) {
-            await supabaseRequest(path, {
+            await vaultRequest(path, {
               method: "PATCH",
               body: JSON.stringify(basePayload),
             });
@@ -2783,11 +2521,11 @@ export default function App() {
           };
           const shaped = applyPromptFallbackColumns(
             config,
-            shapeSupabasePayload(config, canonical),
+            shapeVaultPayload(config, canonical),
             canonical,
             item.fallbackData
           );
-          await supabaseRequest(path, {
+          await vaultRequest(path, {
             method: "PATCH",
             body: JSON.stringify(shaped),
           });
@@ -2800,13 +2538,13 @@ export default function App() {
           return next.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
         });
       } else if (category === "links") {
-        await executeSupabase("links", async (schema) => {
+        await executeVault("links", async (schema) => {
           const config = schema.links;
           const path = buildFilterPath(config, "id", item.id);
-          const basePayload = shapeSupabasePayload(config, { deleted_at: null });
+          const basePayload = shapeVaultPayload(config, { deleted_at: null });
           const needsFallback = !config?.columns?.deleted_at || !Object.keys(basePayload).length;
           if (!needsFallback) {
-            await supabaseRequest(path, {
+            await vaultRequest(path, {
               method: "PATCH",
               body: JSON.stringify(basePayload),
             });
@@ -2822,11 +2560,11 @@ export default function App() {
           };
           const shaped = applyLinkFallbackColumns(
             config,
-            shapeSupabasePayload(config, canonical),
+            shapeVaultPayload(config, canonical),
             canonical,
             item.fallbackData
           );
-          await supabaseRequest(path, {
+          await vaultRequest(path, {
             method: "PATCH",
             body: JSON.stringify(shaped),
           });
@@ -2840,18 +2578,18 @@ export default function App() {
         });
       } else if (category === "scripts") {
         const ids = collectScriptBranchIds(item.id, trashedScripts);
-        const idColumn = supabaseSchema.scripts.columns.id ?? "id";
+        const idColumn = vaultSchema.scripts.columns.id ?? "id";
         const idList = Array.from(ids)
           .map((value) => `"${value}"`)
           .join(",");
         const encodedValues = encodeURIComponent(`(${idList})`);
-        await executeSupabase("scripts", async (schema) => {
+        await executeVault("scripts", async (schema) => {
           const config = schema.scripts;
           const path = `${config.table}?${encodeURIComponent(idColumn)}=in.${encodedValues}`;
-          const basePayload = shapeSupabasePayload(config, { deleted_at: null });
+          const basePayload = shapeVaultPayload(config, { deleted_at: null });
           const needsFallback = !config?.columns?.deleted_at || !Object.keys(basePayload).length;
           if (!needsFallback) {
-            await supabaseRequest(path, {
+            await vaultRequest(path, {
               method: "PATCH",
               body: JSON.stringify(basePayload),
             });
@@ -2870,11 +2608,11 @@ export default function App() {
             };
             const shaped = applyScriptFallbackColumns(
               config,
-              shapeSupabasePayload(config, canonical),
+              shapeVaultPayload(config, canonical),
               canonical,
               entry.fallbackData
             );
-            await supabaseRequest(buildFilterPath(config, "id", value), {
+            await vaultRequest(buildFilterPath(config, "id", value), {
               method: "PATCH",
               body: JSON.stringify(shaped),
             });
@@ -2899,7 +2637,7 @@ export default function App() {
     } catch (error) {
       console.error("Failed to restore item", error);
       setVaultError(
-        describeSupabaseError(error, "Unable to restore the item in Supabase.")
+        describeVaultError(error, "Unable to restore the item in Cloudflare R2.")
       );
     } finally {
       setIsProcessing(false);
@@ -3058,7 +2796,7 @@ export default function App() {
     } catch (error) {
       console.error("Failed to download item", error);
       setVaultError(
-        describeSupabaseError(error, "Unable to download the requested item.")
+        describeVaultError(error, "Unable to download the requested item.")
       );
     } finally {
       setIsProcessing(false);
@@ -3163,7 +2901,7 @@ export default function App() {
     } catch (error) {
       console.error("Failed to bundle download", error);
       setVaultError(
-        describeSupabaseError(error, "Unable to build the bulk download archive.")
+        describeVaultError(error, "Unable to build the bulk download archive.")
       );
     } finally {
       setIsProcessing(false);
@@ -3182,7 +2920,7 @@ export default function App() {
     } catch (error) {
       console.error("Failed to bundle download", error);
       setVaultError(
-        describeSupabaseError(error, "Unable to build the bulk download archive.")
+        describeVaultError(error, "Unable to build the bulk download archive.")
       );
     } finally {
       setIsProcessing(false);
@@ -3227,7 +2965,7 @@ export default function App() {
       setVaultError("");
       if (editingItem.category === "prompts") {
         const description = String(form.get("description") || "").trim();
-        await executeSupabase("prompts", async (schema) => {
+        await executeVault("prompts", async (schema) => {
           const canonical = {
             name,
             description,
@@ -3239,11 +2977,11 @@ export default function App() {
           };
           const updatePayload = applyPromptFallbackColumns(
             schema.prompts,
-            shapeSupabasePayload(schema.prompts, canonical),
+            shapeVaultPayload(schema.prompts, canonical),
             canonical,
             editingItem.item.fallbackData
           );
-          await supabaseRequest(buildFilterPath(schema.prompts, "id", editingItem.item.id), {
+          await vaultRequest(buildFilterPath(schema.prompts, "id", editingItem.item.id), {
             method: "PATCH",
             headers: { Prefer: "return=representation" },
             body: JSON.stringify(updatePayload),
@@ -3256,7 +2994,7 @@ export default function App() {
         );
       } else if (editingItem.category === "links") {
         const url = String(form.get("url") || "").trim();
-        await executeSupabase("links", async (schema) => {
+        await executeVault("links", async (schema) => {
           const canonical = {
             name,
             url,
@@ -3268,11 +3006,11 @@ export default function App() {
           };
           const updatePayload = applyLinkFallbackColumns(
             schema.links,
-            shapeSupabasePayload(schema.links, canonical),
+            shapeVaultPayload(schema.links, canonical),
             canonical,
             editingItem.item.fallbackData
           );
-          await supabaseRequest(buildFilterPath(schema.links, "id", editingItem.item.id), {
+          await vaultRequest(buildFilterPath(schema.links, "id", editingItem.item.id), {
             method: "PATCH",
             headers: { Prefer: "return=representation" },
             body: JSON.stringify(updatePayload),
@@ -3282,7 +3020,7 @@ export default function App() {
           prev.map((entry) => (entry.id === editingItem.item.id ? { ...entry, name, url, notes } : entry))
         );
       } else if (editingItem.category === "scripts") {
-        await executeSupabase("scripts", async (schema) => {
+        await executeVault("scripts", async (schema) => {
           const canonical = {
             name,
             notes,
@@ -3293,11 +3031,11 @@ export default function App() {
           };
           const updatePayload = applyScriptFallbackColumns(
             schema.scripts,
-            shapeSupabasePayload(schema.scripts, canonical),
+            shapeVaultPayload(schema.scripts, canonical),
             canonical,
             editingItem.item.fallbackData
           );
-          await supabaseRequest(buildFilterPath(schema.scripts, "id", editingItem.item.id), {
+          await vaultRequest(buildFilterPath(schema.scripts, "id", editingItem.item.id), {
             method: "PATCH",
             headers: { Prefer: "return=representation" },
             body: JSON.stringify(updatePayload),
@@ -3338,7 +3076,7 @@ export default function App() {
     } catch (error) {
       console.error("Failed to update item", error);
       setVaultError(
-        describeSupabaseError(error, "Unable to update the item in Supabase.")
+        describeVaultError(error, "Unable to update the item in Cloudflare R2.")
       );
     } finally {
       setIsProcessing(false);
@@ -3996,13 +3734,13 @@ export default function App() {
                 try {
                   setIsProcessing(true);
                   setVaultError("");
-                  await executeSupabase("allowed_emails", async (schema) => {
-                    const payload = shapeSupabasePayload(schema.allowed_emails, {
+                  await executeVault("allowed_emails", async (schema) => {
+                    const payload = shapeVaultPayload(schema.allowed_emails, {
                       email,
                       role: "member",
                       created_at: new Date().toISOString(),
                     });
-                    await supabaseRequest(schema.allowed_emails.table, {
+                    await vaultRequest(schema.allowed_emails.table, {
                       method: "POST",
                       headers: { Prefer: "resolution=ignore-duplicates" },
                       body: JSON.stringify([payload]),
@@ -4016,9 +3754,9 @@ export default function App() {
                 } catch (error) {
                   console.error("Failed to store allowed email", error);
                   setVaultError(
-                    describeSupabaseError(
+                    describeVaultError(
                       error,
-                      "Unable to save the approved email in Supabase."
+                      "Unable to save the approved email in Cloudflare R2."
                     )
                   );
                 } finally {
@@ -4058,8 +3796,8 @@ export default function App() {
                       try {
                         setIsProcessing(true);
                         setVaultError("");
-                        await supabaseRequest(
-                          buildFilterPath(supabaseSchema.allowed_emails, "email", email),
+                        await vaultRequest(
+                          buildFilterPath(vaultSchema.allowed_emails, "email", email),
                           { method: "DELETE" }
                         );
                         setAllowedEmails((prev) => prev.filter((entry) => entry !== email));
@@ -4067,9 +3805,9 @@ export default function App() {
                       } catch (error) {
                         console.error("Failed to remove allowed email", error);
                         setVaultError(
-                          describeSupabaseError(
+                          describeVaultError(
                             error,
-                            "Unable to remove the approved email from Supabase."
+                            "Unable to remove the approved email from Cloudflare R2."
                           )
                         );
                       } finally {
@@ -4654,7 +4392,7 @@ const renderBinTab = () => {
               <Database className="h-5 w-5" />
             </div>
             <div>
-              <h2 className="text-xl font-semibold text-white">Supabase vault</h2>
+              <h2 className="text-xl font-semibold text-white">Cloudflare R2 vault</h2>
               <p className="text-sm text-slate-400">Cloud storage keeps every upload backed up and shareable.</p>
             </div>
           </div>
@@ -4663,19 +4401,6 @@ const renderBinTab = () => {
               <Cloud className={`h-4 w-4 ${storageReady ? "text-[#58a6ff]" : "text-current"}`} /> {connectionLabel}
             </span>
             {vaultStatus && <span className="text-xs text-slate-300">{vaultStatus}</span>}
-            {schemaWarningText && !schemaWarningDismissed && (
-              <div className="flex items-center gap-2 rounded-full border border-[#58a6ff]/40 bg-[#0b2f53] px-3 py-1 text-xs text-[#9cc4ff]">
-                <Info className="h-4 w-4" />
-                <span className="whitespace-pre-wrap">{schemaWarningText}</span>
-                <button
-                  type="button"
-                  onClick={() => setSchemaWarningDismissed(true)}
-                  className="rounded-full px-2 py-0.5 text-[10px] uppercase tracking-wide transition hover:bg-[#13233d]"
-                >
-                  Dismiss
-                </button>
-              </div>
-            )}
             {vaultError && (
               <span className="rounded-full border border-rose-500/40 bg-rose-500/15 px-3 py-1 text-xs text-rose-100">
                 {vaultError}

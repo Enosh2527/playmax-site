@@ -5,29 +5,37 @@ const {
 } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 
-const requiredEnv = [
-  "R2_ACCOUNT_ID",
-  "R2_ACCESS_KEY_ID",
-  "R2_SECRET_ACCESS_KEY",
-  "R2_BUCKET",
-];
+const DEFAULT_R2_CONFIG = {
+  R2_ACCESS_KEY_ID: "33f46d555ee615172b0ce1cb58017638",
+  R2_SECRET_ACCESS_KEY:
+    "d36aa75d050d65f8dce2affa9ba51bd5d3437a623a95792ddc97b5455bcabd6f",
+  R2_ACCOUNT_ID: "cdb6fe7f2b93a9c99d0966ae16f28826",
+  R2_BUCKET: "vault-files",
+  R2_REGION: "auto",
+};
 
-for (const key of requiredEnv) {
-  if (!process.env[key]) {
-    console.warn(`Missing environment variable ${key} for R2 integration.`);
-  }
+const resolveEnv = (key) => process.env[key] || DEFAULT_R2_CONFIG[key];
+
+const accountId = resolveEnv("R2_ACCOUNT_ID");
+const accessKeyId = resolveEnv("R2_ACCESS_KEY_ID");
+const secretAccessKey = resolveEnv("R2_SECRET_ACCESS_KEY");
+const bucketName = resolveEnv("R2_BUCKET");
+const region = resolveEnv("R2_REGION") || "auto";
+
+if (!accountId || !accessKeyId || !secretAccessKey || !bucketName) {
+  console.warn(
+    "Cloudflare R2 credentials are missing. Set R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, and R2_BUCKET to enable uploads."
+  );
 }
 
 const s3 = new S3Client({
-  region: process.env.R2_REGION || "auto",
-  endpoint: process.env.R2_ACCOUNT_ID
-    ? `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`
-    : undefined,
+  region,
+  endpoint: accountId ? `https://${accountId}.r2.cloudflarestorage.com` : undefined,
   credentials:
-    process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY
+    accessKeyId && secretAccessKey
       ? {
-          accessKeyId: process.env.R2_ACCESS_KEY_ID,
-          secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
+          accessKeyId,
+          secretAccessKey,
         }
       : undefined,
   forcePathStyle: true,
@@ -53,7 +61,7 @@ exports.handler = async (event) => {
   }
 
   try {
-    const bucket = process.env.R2_BUCKET;
+    const bucket = bucketName;
     if (!bucket) {
       throw new Error("R2 bucket is not configured.");
     }
