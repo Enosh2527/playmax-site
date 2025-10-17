@@ -47,6 +47,23 @@ const allowCors = {
   "Access-Control-Allow-Headers": "Content-Type",
 };
 
+function streamToBuffer(stream) {
+  if (!stream) {
+    return Buffer.alloc(0);
+  }
+
+  if (typeof stream.arrayBuffer === "function") {
+    return stream.arrayBuffer().then((arrayBuffer) => Buffer.from(arrayBuffer));
+  }
+
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    stream.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    stream.on("error", (error) => reject(error));
+    stream.on("end", () => resolve(Buffer.concat(chunks)));
+  });
+}
+
 exports.handler = async (event) => {
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 204, headers: allowCors };
@@ -97,6 +114,26 @@ exports.handler = async (event) => {
         statusCode: 200,
         headers: allowCors,
         body: JSON.stringify({ key }),
+      };
+    }
+
+    if (action === "proxy-download") {
+      const result = await s3.send(
+        new GetObjectCommand({
+          Bucket: bucket,
+          Key: key,
+        })
+      );
+      const buffer = await streamToBuffer(result.Body);
+      return {
+        statusCode: 200,
+        headers: allowCors,
+        body: JSON.stringify({
+          key,
+          data: buffer.toString("base64"),
+          encoding: "base64",
+          contentType: result.ContentType || "application/octet-stream",
+        }),
       };
     }
 

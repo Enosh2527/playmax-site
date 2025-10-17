@@ -256,13 +256,55 @@ async function downloadPointerToUint8Array(key) {
   if (!key) {
     throw new Error("Missing R2 key for download.");
   }
-  const url = await requestPresignedUrl("download", key);
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to download R2 object (status ${response.status}).`);
+
+  const attemptDirectDownload = async () => {
+    const url = await requestPresignedUrl("download", key);
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Failed to download R2 object (status ${response.status}).`);
+    }
+    const buffer = await response.arrayBuffer();
+    return new Uint8Array(buffer);
+  };
+
+  try {
+    return await attemptDirectDownload();
+  } catch (error) {
+    const message = typeof error?.message === "string" ? error.message : "";
+    const shouldFallback =
+      error?.name === "TypeError" || /failed to fetch/i.test(message) || /status\s(4|5)\d{2}/i.test(message);
+
+    if (!shouldFallback) {
+      throw error;
+    }
+
+    try {
+      const response = await fetch("/api/presign-upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "proxy-download", key }),
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(text || "Failed to download file from R2 via proxy.");
+      }
+      const payload = await response.json().catch(() => ({}));
+      if (payload?.error) {
+        throw new Error(payload.error);
+      }
+      if (!payload?.data) {
+        throw new Error("Proxy download did not return any data.");
+      }
+      const encoding = payload.encoding || "base64";
+      if (encoding !== "base64") {
+        throw new Error(`Unsupported proxy encoding: ${encoding}`);
+      }
+      return base64ToUint8Array(payload.data);
+    } catch (proxyError) {
+      proxyError.cause = error;
+      throw proxyError;
+    }
   }
-  const buffer = await response.arrayBuffer();
-  return new Uint8Array(buffer);
 }
 
 const textEncoder = new TextEncoder();
