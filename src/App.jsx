@@ -307,6 +307,37 @@ async function downloadPointerToUint8Array(key) {
   }
 }
 
+async function deleteStorageKeys(keys) {
+  const list = Array.isArray(keys) ? keys : [keys];
+  const unique = Array.from(
+    new Set(
+      list
+        .map((value) => (typeof value === "string" ? decodeStoragePointer(value) || value : ""))
+        .filter(Boolean)
+    )
+  );
+
+  if (!unique.length) {
+    return;
+  }
+
+  const response = await fetch("/api/presign-upload", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "delete", keys: unique }),
+  });
+
+  if (!response.ok) {
+    const message = await response.text();
+    throw new Error(message || "Failed to delete files from Cloudflare R2.");
+  }
+
+  const payload = await response.json().catch(() => ({}));
+  if (payload?.error) {
+    throw new Error(payload.error);
+  }
+}
+
 const textEncoder = new TextEncoder();
 
 function base64ToUint8Array(base64) {
@@ -350,6 +381,38 @@ async function loadStorageBinary(value) {
     return base64ToUint8Array(legacyContent);
   }
   return new Uint8Array(0);
+}
+
+function collectEntryStorageKeys(entry, targetSet) {
+  if (!entry || !targetSet) return;
+  const addKey = (value) => {
+    if (!value) return;
+    const parsed = parseStorageValue(value);
+    if (parsed.key) {
+      targetSet.add(parsed.key);
+    }
+  };
+
+  if (entry.contentKey) {
+    targetSet.add(entry.contentKey);
+  } else {
+    addKey(entry.content);
+  }
+
+  if (entry.referenceKey) {
+    targetSet.add(entry.referenceKey);
+  } else {
+    addKey(entry.referenceContent);
+  }
+
+  if (entry.fallbackData?.reference) {
+    const ref = entry.fallbackData.reference;
+    if (ref.key) {
+      targetSet.add(ref.key);
+    } else if (ref.content) {
+      addKey(ref.content);
+    }
+  }
 }
 
 async function prepareReferenceFile(file, { category, ownerId }) {
@@ -1690,6 +1753,11 @@ export default function App() {
     async ({ prompts: expiredPrompts = [], links: expiredLinks = [], scripts: expiredScripts = [] }) => {
       if (!storageReady) return;
 
+      const keysToRemove = new Set();
+      expiredPrompts.forEach((item) => collectEntryStorageKeys(item, keysToRemove));
+      expiredLinks.forEach((item) => collectEntryStorageKeys(item, keysToRemove));
+      expiredScripts.forEach((item) => collectEntryStorageKeys(item, keysToRemove));
+
       const deleteByIds = async (tableKey, ids) => {
         if (!ids.length) return;
         await executeVault(tableKey, async (schema) => {
@@ -1728,6 +1796,14 @@ export default function App() {
         );
       } catch (error) {
         console.warn("Failed to clean up expired trash", error);
+      } finally {
+        if (keysToRemove.size) {
+          try {
+            await deleteStorageKeys(Array.from(keysToRemove));
+          } catch (cleanupError) {
+            console.warn("Failed to delete expired Cloudflare R2 files", cleanupError);
+          }
+        }
       }
     },
     [executeVault, storageReady]
@@ -2960,6 +3036,8 @@ export default function App() {
     const targets = bulk ? items ?? [] : item ? [item] : [];
     if (!targets.length) return;
     const idsToClear = new Set();
+    const storageKeysToDelete = new Set();
+    const stateUpdates = [];
     let completed = false;
     try {
       setIsProcessing(true);
@@ -2969,6 +3047,9 @@ export default function App() {
         const ids = new Set(targets.map((entry) => entry.id).filter(Boolean));
         ids.forEach((id) => idsToClear.add(id));
         const deletedAt = permanent ? null : new Date().toISOString();
+        if (permanent) {
+          targets.forEach((entry) => collectEntryStorageKeys(entry, storageKeysToDelete));
+        }
         await executeVault("prompts", async (schema) => {
           const config = schema.prompts;
           const path = buildInFilterPath(config, "id", Array.from(ids));
@@ -3009,24 +3090,31 @@ export default function App() {
           }
         });
         if (permanent) {
-          setTrashedPrompts((prev) => prev.filter((entry) => !ids.has(entry.id)));
+          stateUpdates.push(() =>
+            setTrashedPrompts((prev) => prev.filter((entry) => !ids.has(entry.id)))
+          );
         } else {
-          setPrompts((prev) => prev.filter((entry) => !ids.has(entry.id)));
-          setTrashedPrompts((prev) => {
-            const moved = targets.map((entry) => ({
-              ...entry,
-              deletedAt,
-              category: "prompts",
-            }));
-            const remaining = prev.filter((entry) => !ids.has(entry.id));
-            const next = [...moved, ...remaining];
-            return next.sort((a, b) => new Date(b.deletedAt || 0) - new Date(a.deletedAt || 0));
-          });
+          const moved = targets.map((entry) => ({
+            ...entry,
+            deletedAt,
+            category: "prompts",
+          }));
+          stateUpdates.push(() => setPrompts((prev) => prev.filter((entry) => !ids.has(entry.id))));
+          stateUpdates.push(() =>
+            setTrashedPrompts((prev) => {
+              const remaining = prev.filter((entry) => !ids.has(entry.id));
+              const next = [...moved, ...remaining];
+              return next.sort((a, b) => new Date(b.deletedAt || 0) - new Date(a.deletedAt || 0));
+            })
+          );
         }
       } else if (category === "links") {
         const ids = new Set(targets.map((entry) => entry.id).filter(Boolean));
         ids.forEach((id) => idsToClear.add(id));
         const deletedAt = permanent ? null : new Date().toISOString();
+        if (permanent) {
+          targets.forEach((entry) => collectEntryStorageKeys(entry, storageKeysToDelete));
+        }
         await executeVault("links", async (schema) => {
           const config = schema.links;
           const path = buildInFilterPath(config, "id", Array.from(ids));
@@ -3066,29 +3154,42 @@ export default function App() {
           }
         });
         if (permanent) {
-          setTrashedLinks((prev) => prev.filter((entry) => !ids.has(entry.id)));
+          stateUpdates.push(() =>
+            setTrashedLinks((prev) => prev.filter((entry) => !ids.has(entry.id)))
+          );
         } else {
-          setLinks((prev) => prev.filter((entry) => !ids.has(entry.id)));
-          setTrashedLinks((prev) => {
-            const moved = targets.map((entry) => ({
-              ...entry,
-              deletedAt,
-              category: "links",
-            }));
-            const remaining = prev.filter((entry) => !ids.has(entry.id));
-            const next = [...moved, ...remaining];
-            return next.sort((a, b) => new Date(b.deletedAt || 0) - new Date(a.deletedAt || 0));
-          });
+          const moved = targets.map((entry) => ({
+            ...entry,
+            deletedAt,
+            category: "links",
+          }));
+          stateUpdates.push(() => setLinks((prev) => prev.filter((entry) => !ids.has(entry.id))));
+          stateUpdates.push(() =>
+            setTrashedLinks((prev) => {
+              const remaining = prev.filter((entry) => !ids.has(entry.id));
+              const next = [...moved, ...remaining];
+              return next.sort((a, b) => new Date(b.deletedAt || 0) - new Date(a.deletedAt || 0));
+            })
+          );
         }
       } else if (category === "scripts") {
         const sourceItems = permanent ? trashedScripts : scripts;
+        const scriptMap = permanent ? trashedScriptsById : scriptsById;
         const branchIds = new Set();
         targets.forEach((target) => {
+          if (!target?.id) return;
           const ids = collectScriptBranchIds(target.id, sourceItems);
           ids.forEach((value) => branchIds.add(value));
         });
         const idValues = Array.from(branchIds).filter(Boolean);
         idValues.forEach((value) => idsToClear.add(value));
+        const branchEntries = idValues
+          .map((value) => scriptMap.get(value))
+          .filter((entry) => entry);
+        if (permanent) {
+          targets.forEach((entry) => collectEntryStorageKeys(entry, storageKeysToDelete));
+          branchEntries.forEach((entry) => collectEntryStorageKeys(entry, storageKeysToDelete));
+        }
         if (idValues.length) {
           const deletedAt = permanent ? null : new Date().toISOString();
           await executeVault("scripts", async (schema) => {
@@ -3132,20 +3233,34 @@ export default function App() {
             }
           });
           if (permanent) {
-            setTrashedScripts((prev) => prev.filter((entry) => !branchIds.has(entry.id)));
+            stateUpdates.push(() =>
+              setTrashedScripts((prev) => prev.filter((entry) => !branchIds.has(entry.id)))
+            );
           } else {
-            const moved = scripts.filter((entry) => branchIds.has(entry.id));
-            setScripts((prev) => prev.filter((entry) => !branchIds.has(entry.id)));
-            setTrashedScripts((prev) => {
-              const next = [
-                ...moved.map((entry) => ({ ...entry, deletedAt, category: "scripts" })),
-                ...prev.filter((entry) => !branchIds.has(entry.id)),
-              ];
-              return next.sort((a, b) => new Date(b.deletedAt || 0) - new Date(a.deletedAt || 0));
-            });
+            const moved = branchEntries.map((entry) => ({
+              ...entry,
+              deletedAt,
+              category: "scripts",
+            }));
+            stateUpdates.push(() =>
+              setScripts((prev) => prev.filter((entry) => !branchIds.has(entry.id)))
+            );
+            stateUpdates.push(() =>
+              setTrashedScripts((prev) => {
+                const remaining = prev.filter((entry) => !branchIds.has(entry.id));
+                const next = [...moved, ...remaining];
+                return next.sort((a, b) => new Date(b.deletedAt || 0) - new Date(a.deletedAt || 0));
+              })
+            );
           }
         }
       }
+
+      if (permanent && storageKeysToDelete.size) {
+        await deleteStorageKeys(Array.from(storageKeysToDelete));
+      }
+
+      stateUpdates.forEach((update) => update());
 
       if (idsToClear.size) {
         clearSelectionFor(category, idsToClear);

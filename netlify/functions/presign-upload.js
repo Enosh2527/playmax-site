@@ -2,6 +2,8 @@ const {
   S3Client,
   PutObjectCommand,
   GetObjectCommand,
+  DeleteObjectCommand,
+  DeleteObjectsCommand,
 } = require("@aws-sdk/client-s3");
 const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
 
@@ -83,12 +85,12 @@ exports.handler = async (event) => {
       throw new Error("R2 bucket is not configured.");
     }
 
-    const { action, key, contentType, data, encoding } = JSON.parse(event.body || "{}");
-    if (!action || !key) {
+    const { action, key, keys, contentType, data, encoding } = JSON.parse(event.body || "{}");
+    if (!action) {
       return {
         statusCode: 400,
         headers: allowCors,
-        body: JSON.stringify({ error: "Missing action or key" }),
+        body: JSON.stringify({ error: "Missing action" }),
       };
     }
 
@@ -134,6 +136,65 @@ exports.handler = async (event) => {
           encoding: "base64",
           contentType: result.ContentType || "application/octet-stream",
         }),
+      };
+    }
+
+    if (action === "delete") {
+      const provided = Array.isArray(keys)
+        ? keys
+        : Array.isArray(key)
+        ? key
+        : key
+        ? [key]
+        : [];
+      const uniqueKeys = Array.from(
+        new Set(
+          provided
+            .map((value) => (typeof value === "string" ? value.trim() : ""))
+            .filter(Boolean)
+        )
+      );
+      if (!uniqueKeys.length) {
+        return {
+          statusCode: 400,
+          headers: allowCors,
+          body: JSON.stringify({ error: "Missing file keys for delete action" }),
+        };
+      }
+
+      if (uniqueKeys.length === 1) {
+        await s3.send(
+          new DeleteObjectCommand({
+            Bucket: bucket,
+            Key: uniqueKeys[0],
+          })
+        );
+      } else {
+        // R2 supports the S3 multi-delete API; chunk keys to stay within limits.
+        const chunkSize = 1000;
+        for (let index = 0; index < uniqueKeys.length; index += chunkSize) {
+          const chunk = uniqueKeys.slice(index, index + chunkSize).map((value) => ({ Key: value }));
+          await s3.send(
+            new DeleteObjectsCommand({
+              Bucket: bucket,
+              Delete: { Objects: chunk },
+            })
+          );
+        }
+      }
+
+      return {
+        statusCode: 200,
+        headers: allowCors,
+        body: JSON.stringify({ deleted: uniqueKeys.length }),
+      };
+    }
+
+    if (!key) {
+      return {
+        statusCode: 400,
+        headers: allowCors,
+        body: JSON.stringify({ error: "Missing key" }),
       };
     }
 
