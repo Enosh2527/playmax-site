@@ -19,6 +19,10 @@ import {
   MoreHorizontal,
   Layers,
   Cloud,
+  Search,
+  SlidersHorizontal,
+  ChevronDown,
+  X,
 } from "lucide-react";
 import { Button } from "./components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
@@ -55,50 +59,85 @@ const categories = [
   { id: "links", label: "Links", icon: Link2, accent: "from-[#bf3989] to-[#f778ba]" },
 ];
 
+const TAB_LABELS = {
+  prompts: "Prompts",
+  scripts: "Scripts",
+  links: "Links",
+  bin: "Bin",
+};
+
 const TRASH_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 const VAULT_STORE_FUNCTION = "/api/vault-store";
+const RETRYABLE_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504]);
 
 async function vaultRequest(path, { method = "GET", body, signal } = {}) {
-  const response = await fetch(VAULT_STORE_FUNCTION, {
-    method: "POST",
-    signal,
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path, method, body }),
-  });
+  const normalizedMethod = String(method || "GET").toUpperCase();
+  const maxAttempts = normalizedMethod === "GET" ? 3 : 2;
+  let attempt = 0;
+  let lastError = null;
 
-  const contentType = response.headers.get("Content-Type") || "";
-  const rawText = await response.text();
+  const attemptRequest = async () => {
+    const response = await fetch(VAULT_STORE_FUNCTION, {
+      method: "POST",
+      signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, method: normalizedMethod, body }),
+    });
 
-  if (!response.ok) {
-    let message = rawText || "Storage request failed.";
-    try {
-      const parsed = JSON.parse(rawText);
-      if (parsed?.error) {
-        message = parsed.error;
+    const contentType = response.headers.get("Content-Type") || "";
+    const rawText = await response.text();
+
+    if (!response.ok) {
+      let message = rawText || "Storage request failed.";
+      try {
+        const parsed = JSON.parse(rawText);
+        if (parsed?.error) {
+          message = parsed.error;
+        }
+      } catch (error) {
+        // Ignore JSON parse failures – fall back to raw text.
       }
-    } catch (error) {
-      // Ignore JSON parse failures – fall back to raw text.
+      const storageError = new Error(message);
+      storageError.status = response.status;
+      throw storageError;
     }
-    const storageError = new Error(message);
-    storageError.status = response.status;
-    throw storageError;
-  }
 
-  if (!rawText || !rawText.trim()) {
-    return null;
-  }
-
-  if (/application\/json/i.test(contentType)) {
-    try {
-      return JSON.parse(rawText);
-    } catch (error) {
-      console.warn("Failed to parse storage JSON response", error);
+    if (!rawText || !rawText.trim()) {
       return null;
     }
+
+    if (/application\/json/i.test(contentType)) {
+      try {
+        return JSON.parse(rawText);
+      } catch (error) {
+        console.warn("Failed to parse storage JSON response", error);
+        return null;
+      }
+    }
+
+    return rawText;
+  };
+
+  while (attempt < maxAttempts) {
+    try {
+      return await attemptRequest();
+    } catch (error) {
+      lastError = error;
+      if (error?.name === "AbortError") {
+        throw error;
+      }
+      const status = error?.status;
+      const retryable = typeof status === "number" ? RETRYABLE_STATUS_CODES.has(status) : true;
+      if (attempt + 1 >= maxAttempts || !retryable) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+    }
+    attempt += 1;
   }
 
-  return rawText;
+  throw lastError ?? new Error("Storage request failed.");
 }
 
 const STORAGE_POINTER_PREFIX = "r2://";
@@ -378,6 +417,57 @@ function formatDateTime(iso) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function normalizeSearchValue(value) {
+  return String(value || "").toLowerCase();
+}
+
+function matchesQueryField(value, query) {
+  if (!query) {
+    return true;
+  }
+  return normalizeSearchValue(value).includes(query);
+}
+
+function promptMatchesSearch(item, query) {
+  if (!query) {
+    return true;
+  }
+  return (
+    matchesQueryField(item.name, query) ||
+    matchesQueryField(item.description, query) ||
+    matchesQueryField(item.notes, query) ||
+    matchesQueryField(item.uploader, query) ||
+    matchesQueryField(item.uploaderEmail, query)
+  );
+}
+
+function linkMatchesSearch(item, query) {
+  if (!query) {
+    return true;
+  }
+  return (
+    matchesQueryField(item.name, query) ||
+    matchesQueryField(item.url, query) ||
+    matchesQueryField(item.notes, query) ||
+    matchesQueryField(item.uploader, query) ||
+    matchesQueryField(item.uploaderEmail, query)
+  );
+}
+
+function scriptMatchesSearch(item, query, pathLabel = "") {
+  if (!query) {
+    return true;
+  }
+  return (
+    matchesQueryField(item.name, query) ||
+    matchesQueryField(item.originalName, query) ||
+    matchesQueryField(item.notes, query) ||
+    matchesQueryField(item.uploader, query) ||
+    matchesQueryField(item.uploaderEmail, query) ||
+    matchesQueryField(pathLabel, query)
+  );
 }
 
 function formatTrashTimeRemaining(deletedAt) {
@@ -1154,6 +1244,87 @@ export default function App() {
   const [editingItem, setEditingItem] = useState(null);
   const [linkDownloadTarget, setLinkDownloadTarget] = useState(null);
   const [pendingDelete, setPendingDelete] = useState(null);
+  const [searchValue, setSearchValue] = useState("");
+  const [searchScope, setSearchScope] = useState({ type: "global", target: null });
+  const [searchConfig, setSearchConfig] = useState({
+    mode: "none",
+    query: "",
+    display: "",
+    tab: null,
+    user: null,
+  });
+  const [advancedSearchOpen, setAdvancedSearchOpen] = useState(false);
+
+  const userScopeEmail = searchConfig.mode === "user" ? searchConfig.user : null;
+  const searchQuery = searchConfig.query;
+  const isSearchActive = useMemo(() => {
+    if (searchConfig.mode === "user") {
+      return Boolean(searchConfig.user);
+    }
+    if (searchConfig.mode === "global" || searchConfig.mode === "tab") {
+      return Boolean(searchConfig.query);
+    }
+    return false;
+  }, [searchConfig]);
+
+  const isSearchActiveForCategory = useCallback(
+    (category) => {
+      if (!isSearchActive) {
+        return false;
+      }
+      if (searchConfig.mode === "global") {
+        return Boolean(searchConfig.query);
+      }
+      if (searchConfig.mode === "tab") {
+        return searchConfig.tab === category && Boolean(searchConfig.query);
+      }
+      if (searchConfig.mode === "user") {
+        return Boolean(searchConfig.user);
+      }
+      return false;
+    },
+    [isSearchActive, searchConfig]
+  );
+
+  const searchScopeLabel = useMemo(() => {
+    if (searchScope.type === "user") {
+      return searchScope.target ? `User: ${searchScope.target}` : "User search";
+    }
+    if (searchScope.type === "tab") {
+      const label = TAB_LABELS[searchScope.target] || "Tab";
+      return `${label} tab`;
+    }
+    return "Global";
+  }, [searchScope]);
+
+  const searchSummary = useMemo(() => {
+    if (!isSearchActive) {
+      return null;
+    }
+    if (searchConfig.mode === "user" && searchConfig.user) {
+      if (searchConfig.display) {
+        return `Searching "${searchConfig.display}" in uploads by ${searchConfig.user}`;
+      }
+      return `Viewing uploads by ${searchConfig.user}`;
+    }
+    if (searchConfig.mode === "tab" && searchConfig.tab) {
+      const label = TAB_LABELS[searchConfig.tab] || searchConfig.tab;
+      return searchConfig.display
+        ? `Searching ${label} for "${searchConfig.display}"`
+        : `Focused on the ${label} tab`;
+    }
+    if (searchConfig.mode === "global" && searchConfig.display) {
+      return `Searching all tabs for "${searchConfig.display}"`;
+    }
+    return null;
+  }, [isSearchActive, searchConfig]);
+
+  const clearSearch = useCallback(() => {
+    setSearchValue("");
+    setSearchConfig({ mode: "none", query: "", display: "", tab: null, user: null });
+    setSearchScope({ type: "global", target: null });
+    setAdvancedSearchOpen(false);
+  }, []);
 
   const [activeTab, setActiveTab] = useState("scripts");
 
@@ -1175,6 +1346,7 @@ export default function App() {
   const sessionHydratedRef = useRef(false);
   const folderInputRef = useRef(null);
   const contextMenuRef = useRef(null);
+  const advancedSearchRef = useRef(null);
 
   const storageReady = vaultReady;
   const describeVaultError = useCallback(
@@ -1595,6 +1767,48 @@ export default function App() {
   }, [vaultReady, refreshWorkspace]);
 
   useEffect(() => {
+    if (searchScope.type === "tab" && !searchScope.target) {
+      setSearchScope((prev) => {
+        if (prev.type !== "tab" || prev.target) {
+          return prev;
+        }
+        return { ...prev, target: "scripts" };
+      });
+    }
+  }, [searchScope.type, searchScope.target]);
+
+  const activeUserEmails = useMemo(() => {
+    const emails = users.map((user) => normalizeSearchValue(user.email));
+    return Array.from(new Set(emails.filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  }, [users]);
+
+  useEffect(() => {
+    if (searchScope.type === "user" && !searchScope.target && activeUserEmails.length) {
+      setSearchScope((prev) => {
+        if (prev.type !== "user" || prev.target) {
+          return prev;
+        }
+        return { ...prev, target: activeUserEmails[0] };
+      });
+    }
+  }, [searchScope.type, searchScope.target, activeUserEmails]);
+
+  useEffect(() => {
+    if (!advancedSearchOpen) {
+      return undefined;
+    }
+    const handleClick = (event) => {
+      if (advancedSearchRef.current && !advancedSearchRef.current.contains(event.target)) {
+        setAdvancedSearchOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => {
+      document.removeEventListener("mousedown", handleClick);
+    };
+  }, [advancedSearchOpen]);
+
+  useEffect(() => {
     const handleClick = (event) => {
       if (contextMenuRef.current && !contextMenuRef.current.contains(event.target)) {
         setContextMenu(null);
@@ -1614,22 +1828,117 @@ export default function App() {
     return map;
   }, [scripts]);
 
+  const scriptPathLabels = useMemo(() => {
+    const map = new Map();
+    scripts.forEach((item) => {
+      const parts = [item.name];
+      let parentId = item.parentId;
+      while (parentId) {
+        const parent = scriptsById.get(parentId);
+        if (!parent) {
+          break;
+        }
+        parts.push(parent.name);
+        parentId = parent.parentId;
+      }
+      const label = parts.filter(Boolean).reverse().join(" / ");
+      map.set(item.id, label || item.name || "");
+    });
+    return map;
+  }, [scripts, scriptsById]);
+
   const trashedScriptsById = useMemo(() => {
     const map = new Map();
     trashedScripts.forEach((item) => map.set(item.id, item));
     return map;
   }, [trashedScripts]);
 
+  const trashedScriptPathLabels = useMemo(() => {
+    const map = new Map();
+    trashedScripts.forEach((item) => {
+      const parts = [item.name];
+      let parentId = item.parentId;
+      while (parentId) {
+        const parent = trashedScriptsById.get(parentId);
+        if (!parent) {
+          break;
+        }
+        parts.push(parent.name);
+        parentId = parent.parentId;
+      }
+      const label = parts.filter(Boolean).reverse().join(" / ");
+      map.set(item.id, label || item.name || "");
+    });
+    return map;
+  }, [trashedScripts, trashedScriptsById]);
+
+  const visibleTrashedPrompts = useMemo(() => {
+    let result = trashedPrompts;
+    if (userScopeEmail) {
+      result = result.filter((entry) => normalizeSearchValue(entry.uploaderEmail) === userScopeEmail);
+    }
+    if (isSearchActiveForCategory("bin") && searchQuery) {
+      result = result.filter((entry) => promptMatchesSearch(entry, searchQuery));
+    }
+    return result;
+  }, [trashedPrompts, userScopeEmail, isSearchActiveForCategory, searchQuery]);
+
+  const visibleTrashedLinks = useMemo(() => {
+    let result = trashedLinks;
+    if (userScopeEmail) {
+      result = result.filter((entry) => normalizeSearchValue(entry.uploaderEmail) === userScopeEmail);
+    }
+    if (isSearchActiveForCategory("bin") && searchQuery) {
+      result = result.filter((entry) => linkMatchesSearch(entry, searchQuery));
+    }
+    return result;
+  }, [trashedLinks, userScopeEmail, isSearchActiveForCategory, searchQuery]);
+
+  const visibleTrashedScripts = useMemo(() => {
+    let result = trashedScripts;
+    if (userScopeEmail) {
+      result = result.filter((entry) => normalizeSearchValue(entry.uploaderEmail) === userScopeEmail);
+    }
+    if (isSearchActiveForCategory("bin") && searchQuery) {
+      const matching = new Set();
+      result.forEach((entry) => {
+        if (scriptMatchesSearch(entry, searchQuery, trashedScriptPathLabels.get(entry.id) || "")) {
+          matching.add(entry.id);
+          let parentId = entry.parentId;
+          while (parentId) {
+            matching.add(parentId);
+            const parent = trashedScriptsById.get(parentId);
+            if (!parent) {
+              break;
+            }
+            parentId = parent.parentId;
+          }
+        }
+      });
+      if (matching.size) {
+        result = result.filter((entry) => matching.has(entry.id));
+      }
+    }
+    return result;
+  }, [
+    trashedScripts,
+    userScopeEmail,
+    isSearchActiveForCategory,
+    searchQuery,
+    trashedScriptPathLabels,
+    trashedScriptsById,
+  ]);
+
   const trashedScriptRoots = useMemo(() => {
-    const trashedIds = new Set(trashedScripts.map((item) => item.id));
-    return trashedScripts.filter(
+    const trashedIds = new Set(visibleTrashedScripts.map((item) => item.id));
+    return visibleTrashedScripts.filter(
       (item) => !item.parentId || !trashedIds.has(item.parentId)
     );
-  }, [trashedScripts]);
+  }, [visibleTrashedScripts]);
 
   const trashedScriptSummaries = useMemo(() => {
     const summaries = trashedScriptRoots.map((root) => {
-      const ids = collectScriptBranchIds(root.id, trashedScripts);
+      const ids = collectScriptBranchIds(root.id, visibleTrashedScripts);
       let fileCount = 0;
       let folderCount = 0;
       ids.forEach((id) => {
@@ -1642,19 +1951,26 @@ export default function App() {
           fileCount += 1;
         }
       });
-      return { root, ids, fileCount, folderCount };
+      const pathLabel = trashedScriptPathLabels.get(root.id) || "";
+      const decoratedRoot = pathLabel ? { ...root, pathLabel } : root;
+      return { root: decoratedRoot, ids, fileCount, folderCount };
     });
     return summaries.sort(
       (a, b) => new Date(b.root.deletedAt || 0) - new Date(a.root.deletedAt || 0)
     );
-  }, [trashedScriptRoots, trashedScripts, trashedScriptsById, collectScriptBranchIds]);
+  }, [
+    trashedScriptRoots,
+    visibleTrashedScripts,
+    trashedScriptsById,
+    collectScriptBranchIds,
+  ]);
 
   const scriptBreadcrumbs = useMemo(() => {
     const chain = [];
     let current = currentScriptFolderId ? scriptsById.get(currentScriptFolderId) : null;
     while (current) {
       chain.push({ id: current.id, label: current.name, active: chain.length === 0 });
-      current = current.parentId ? scriptsById.get(current.parentId) : null;
+    current = current.parentId ? scriptsById.get(current.parentId) : null;
     }
     chain.push({ id: null, label: "Scripts", active: chain.length === 0 });
     return chain.reverse().map((crumb, index, array) => ({ ...crumb, active: index === array.length - 1 }));
@@ -1694,35 +2010,108 @@ export default function App() {
   }, [scripts]);
 
   const filteredPrompts = useMemo(() => {
+    let result = prompts;
     const filter = uploaderFilters.prompts;
-    if (!filter) {
-      return prompts;
+    if (filter) {
+      result = result.filter((entry) => normalizeSearchValue(entry.uploaderEmail) === filter);
     }
-    return prompts.filter(
-      (entry) => String(entry.uploaderEmail || "").toLowerCase() === filter
-    );
-  }, [prompts, uploaderFilters.prompts]);
+    if (userScopeEmail) {
+      result = result.filter((entry) => normalizeSearchValue(entry.uploaderEmail) === userScopeEmail);
+    }
+    if (isSearchActiveForCategory("prompts") && searchQuery) {
+      result = result.filter((entry) => promptMatchesSearch(entry, searchQuery));
+    }
+    return result;
+  }, [
+    prompts,
+    uploaderFilters.prompts,
+    userScopeEmail,
+    isSearchActiveForCategory,
+    searchQuery,
+  ]);
 
   const filteredLinks = useMemo(() => {
+    let result = links;
     const filter = uploaderFilters.links;
-    if (!filter) {
-      return links;
+    if (filter) {
+      result = result.filter((entry) => normalizeSearchValue(entry.uploaderEmail) === filter);
     }
-    return links.filter(
-      (entry) => String(entry.uploaderEmail || "").toLowerCase() === filter
-    );
-  }, [links, uploaderFilters.links]);
+    if (userScopeEmail) {
+      result = result.filter((entry) => normalizeSearchValue(entry.uploaderEmail) === userScopeEmail);
+    }
+    if (isSearchActiveForCategory("links") && searchQuery) {
+      result = result.filter((entry) => linkMatchesSearch(entry, searchQuery));
+    }
+    return result;
+  }, [links, uploaderFilters.links, userScopeEmail, isSearchActiveForCategory, searchQuery]);
+
+  const scriptSearchShouldFlatten = useMemo(() => {
+    if (userScopeEmail) {
+      return true;
+    }
+    if (searchConfig.mode === "global") {
+      return Boolean(searchQuery);
+    }
+    if (searchConfig.mode === "tab") {
+      return searchConfig.tab === "scripts" && Boolean(searchQuery);
+    }
+    return false;
+  }, [userScopeEmail, searchConfig, searchQuery]);
 
   const scriptsInView = useMemo(() => {
-    const base = scripts.filter((item) => item.parentId === (currentScriptFolderId ?? null));
-    const filter = uploaderFilters.scripts;
-    if (!filter) {
-      return base;
+    const applyUploaderFilter = (items) => {
+      const filter = uploaderFilters.scripts;
+      if (!filter) {
+        return items;
+      }
+      return items.filter((entry) => normalizeSearchValue(entry.uploaderEmail) === filter);
+    };
+
+    const applyUserScope = (items) => {
+      if (!userScopeEmail) {
+        return items;
+      }
+      return items.filter((entry) => normalizeSearchValue(entry.uploaderEmail) === userScopeEmail);
+    };
+
+    const includePathLabel = scriptSearchShouldFlatten || (isSearchActiveForCategory("scripts") && Boolean(searchQuery));
+
+    if (scriptSearchShouldFlatten) {
+      let result = applyUserScope(applyUploaderFilter(scripts));
+      if (isSearchActiveForCategory("scripts") && searchQuery) {
+        result = result.filter((entry) =>
+          scriptMatchesSearch(entry, searchQuery, scriptPathLabels.get(entry.id) || "")
+        );
+      }
+      return result
+        .map((entry) => ({
+          ...entry,
+          pathLabel: includePathLabel ? scriptPathLabels.get(entry.id) || "" : undefined,
+        }))
+        .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
     }
-    return base.filter(
-      (entry) => String(entry.uploaderEmail || "").toLowerCase() === filter
-    );
-  }, [scripts, currentScriptFolderId, uploaderFilters.scripts]);
+
+    let base = scripts.filter((item) => item.parentId === (currentScriptFolderId ?? null));
+    base = applyUserScope(applyUploaderFilter(base));
+    if (isSearchActiveForCategory("scripts") && searchQuery) {
+      base = base.filter((entry) =>
+        scriptMatchesSearch(entry, searchQuery, scriptPathLabels.get(entry.id) || "")
+      );
+    }
+    return base.map((entry) => ({
+      ...entry,
+      pathLabel: includePathLabel ? scriptPathLabels.get(entry.id) || "" : undefined,
+    }));
+  }, [
+    scripts,
+    currentScriptFolderId,
+    uploaderFilters.scripts,
+    userScopeEmail,
+    scriptSearchShouldFlatten,
+    isSearchActiveForCategory,
+    searchQuery,
+    scriptPathLabels,
+  ]);
 
   const totals = useMemo(
     () => ({
@@ -1790,6 +2179,64 @@ export default function App() {
     setAuthError("");
     setActiveView("dashboard");
   };
+
+  const handleSearchSubmit = useCallback(
+    (event) => {
+      event.preventDefault();
+      const rawQuery = searchValue.trim();
+      const normalizedQuery = rawQuery.toLowerCase();
+      if (searchScope.type === "global") {
+        if (!rawQuery) {
+          setSearchConfig({ mode: "none", query: "", display: "", tab: null, user: null });
+          return;
+        }
+        setSearchConfig({
+          mode: "global",
+          query: normalizedQuery,
+          display: rawQuery,
+          tab: null,
+          user: null,
+        });
+        setAdvancedSearchOpen(false);
+        return;
+      }
+
+      if (searchScope.type === "tab") {
+        const targetTab = searchScope.target || "scripts";
+        setActiveTab(targetTab);
+        setSearchConfig({
+          mode: "tab",
+          query: normalizedQuery,
+          display: rawQuery,
+          tab: targetTab,
+          user: null,
+        });
+        setAdvancedSearchOpen(false);
+        return;
+      }
+
+      if (searchScope.type === "user") {
+        const targetUser = searchScope.target || activeUserEmails[0] || null;
+        if (!targetUser) {
+          return;
+        }
+        setSearchConfig({
+          mode: "user",
+          query: normalizedQuery,
+          display: rawQuery,
+          tab: null,
+          user: targetUser,
+        });
+        setAdvancedSearchOpen(false);
+      }
+    },
+    [
+      searchValue,
+      searchScope,
+      setActiveTab,
+      activeUserEmails,
+    ]
+  );
 
   const handleAddPrompt = async (event) => {
     event.preventDefault();
@@ -3155,6 +3602,9 @@ export default function App() {
             {category === "prompts" && item.description && (
               <p className="mt-2 text-sm text-slate-300">{item.description}</p>
             )}
+            {item.pathLabel && (
+              <p className="mt-2 text-xs text-slate-400">Location: {item.pathLabel}</p>
+            )}
           </div>
         </div>
         <div className="flex items-center gap-2 opacity-0 transition group-hover:opacity-100">
@@ -4220,7 +4670,9 @@ const renderLinksTab = () => {
 
 const renderBinTab = () => {
   const hasItems =
-    trashedPrompts.length || trashedLinks.length || trashedScriptSummaries.length;
+    visibleTrashedPrompts.length ||
+    visibleTrashedLinks.length ||
+    trashedScriptSummaries.length;
 
   const requestDelete = ({ category, item, permanent }) =>
     setPendingDelete({ category, item, permanent });
@@ -4262,6 +4714,9 @@ const renderBinTab = () => {
             <p className="mt-1 text-xs text-slate-400">
               Deleted {formatDateTime(entry.deletedAt)} • {formatTrashTimeRemaining(entry.deletedAt)}
             </p>
+            {entry.pathLabel && (
+              <p className="mt-1 text-xs text-slate-400">Location: {entry.pathLabel}</p>
+            )}
             {extra}
           </div>
         </div>
@@ -4312,8 +4767,8 @@ const renderBinTab = () => {
             );
             return renderEntry(root, extra);
           })}
-          {trashedPrompts.map((entry) => renderEntry(entry))}
-          {trashedLinks.map((entry) => renderEntry(entry))}
+          {visibleTrashedPrompts.map((entry) => renderEntry(entry))}
+          {visibleTrashedLinks.map((entry) => renderEntry(entry))}
         </div>
       ) : (
         <EmptyState
@@ -4347,6 +4802,162 @@ const renderBinTab = () => {
               Signed in as <span className="font-semibold text-white">{currentUser.name}</span>
             </span>
           )}
+          <div
+            ref={advancedSearchRef}
+            className="relative flex flex-col items-stretch gap-2 sm:flex-row sm:items-center"
+          >
+            <form onSubmit={handleSearchSubmit} className="flex items-center gap-2">
+              <div className="flex items-center gap-2 rounded-2xl border border-[#30363d] bg-[#161b22] px-3 py-2">
+                <Search className="h-4 w-4 text-slate-400" />
+                <input
+                  value={searchValue}
+                  onChange={(event) => setSearchValue(event.target.value)}
+                  placeholder="Search uploads"
+                  className="w-48 bg-transparent text-sm text-white placeholder:text-[#8b949e] focus:outline-none"
+                />
+              </div>
+              <Button
+                type="submit"
+                className="bg-[#238636] text-white hover:bg-[#2ea043]"
+                disabled={!storageReady || workspaceLoading}
+              >
+                Search
+              </Button>
+            </form>
+            <Button
+              type="button"
+              variant="outline"
+              className="flex items-center gap-2 border-[#30363d] bg-[#161b22] text-white hover:bg-[#1b2330]"
+              onClick={() => setAdvancedSearchOpen((prev) => !prev)}
+            >
+              <SlidersHorizontal className="h-4 w-4" />
+              <span className="text-sm">Advanced</span>
+              <Badge className="bg-[#0b2f53] text-[10px] text-[#9cc4ff]">{searchScopeLabel}</Badge>
+              <ChevronDown
+                className={`h-4 w-4 transition ${advancedSearchOpen ? "rotate-180" : ""}`}
+              />
+            </Button>
+            {advancedSearchOpen && (
+              <div className="absolute right-0 top-full z-30 mt-3 w-80 rounded-2xl border border-[#30363d] bg-[#0d1117] p-4 shadow-xl">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-semibold text-white">Advanced search</p>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 text-slate-300 hover:bg-[#161b22]"
+                    onClick={() => setAdvancedSearchOpen(false)}
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                </div>
+                <p className="mt-1 text-xs text-slate-400">
+                  Choose how you want to filter results before running a search.
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className={`flex-1 border-[#30363d] ${
+                      searchScope.type === "tab"
+                        ? "bg-[#238636] text-white hover:bg-[#2ea043]"
+                        : "bg-[#161b22] text-slate-200 hover:bg-[#1b2330]"
+                    }`}
+                    onClick={() =>
+                      setSearchScope((prev) => ({
+                        type: "tab",
+                        target:
+                          prev.type === "tab" && prev.target ? prev.target : "scripts",
+                      }))
+                    }
+                  >
+                    Tab wise
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className={`flex-1 border-[#30363d] ${
+                      searchScope.type === "user"
+                        ? "bg-[#1f6feb] text-white hover:bg-[#388bfd]"
+                        : "bg-[#161b22] text-slate-200 hover:bg-[#1b2330]"
+                    }`}
+                    onClick={() =>
+                      setSearchScope((prev) => ({
+                        type: "user",
+                        target:
+                          prev.type === "user" && prev.target
+                            ? prev.target
+                            : activeUserEmails[0] || null,
+                      }))
+                    }
+                  >
+                    User id wise
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="flex-1 border-[#30363d] bg-[#0d1117] text-slate-200 hover:bg-[#161b22]"
+                    onClick={() => setSearchScope({ type: "global", target: null })}
+                  >
+                    All tabs
+                  </Button>
+                </div>
+                {searchScope.type === "tab" && (
+                  <div className="mt-3 space-y-1">
+                    <label className="text-xs uppercase tracking-wide text-slate-400">
+                      Choose tab
+                    </label>
+                    <select
+                      value={searchScope.target || "scripts"}
+                      onChange={(event) =>
+                        setSearchScope({ type: "tab", target: event.target.value })
+                      }
+                      className="w-full rounded-xl border border-[#30363d] bg-[#161b22] px-3 py-2 text-sm text-slate-100 focus:border-[#58a6ff] focus:outline-none"
+                    >
+                      <option value="scripts">Scripts</option>
+                      <option value="prompts">Prompts</option>
+                      <option value="links">Links</option>
+                      <option value="bin">Bin</option>
+                    </select>
+                  </div>
+                )}
+                {searchScope.type === "user" && (
+                  <div className="mt-3 space-y-1">
+                    <label className="text-xs uppercase tracking-wide text-slate-400">
+                      Choose user
+                    </label>
+                    {activeUserEmails.length ? (
+                      <select
+                        value={searchScope.target || activeUserEmails[0] || ""}
+                        onChange={(event) =>
+                          setSearchScope({
+                            type: "user",
+                            target: event.target.value || null,
+                          })
+                        }
+                        className="w-full rounded-xl border border-[#30363d] bg-[#161b22] px-3 py-2 text-sm text-slate-100 focus:border-[#58a6ff] focus:outline-none"
+                      >
+                        {activeUserEmails.map((email) => (
+                          <option key={email} value={email}>
+                            {email}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <p className="rounded-xl border border-[#30363d] bg-[#161b22] px-3 py-2 text-xs text-rose-300">
+                        No active user ids available yet.
+                      </p>
+                    )}
+                  </div>
+                )}
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
+                  <span>Current scope: {searchScopeLabel}</span>
+                  <Button variant="ghost" size="sm" onClick={clearSearch} className="h-8 px-3 text-slate-200">
+                    Clear search
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
           <Button
             variant="outline"
             className="border-[#30363d] bg-[#161b22] text-white hover:bg-[#1b2330]"
@@ -4404,6 +5015,11 @@ const renderBinTab = () => {
             {vaultError && (
               <span className="rounded-full border border-rose-500/40 bg-rose-500/15 px-3 py-1 text-xs text-rose-100">
                 {vaultError}
+              </span>
+            )}
+            {searchSummary && (
+              <span className="rounded-full border border-[#30363d] bg-[#161b22] px-3 py-1 text-xs text-slate-200">
+                {searchSummary}
               </span>
             )}
             <Button
